@@ -1,71 +1,162 @@
+{-# LANGUAGE DeriveFunctor #-}
 -- {-# LANGUAGE NamedFieldPuns #-}
 -- {-# LANGUAGE RecordWildcards #-}
 -- {-# OPTIONS_GHC -Wall #-}
 
 import Data.Map (Map)
 import qualified Data.Map as M
+
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as N
+
 import Data.List (nub)
 import Control.Monad.Reader
+import Control.Monad.State
+import Control.Monad.Identity
+import Control.Monad (forM)
 -- import Data.Either.Combinators (rightToMaybe)
+
+
+data Stmt
+    = SNewVar VarId Expr
+    | SSetVar VarId Expr
+    | SIfThenElse Expr [Stmt] [Stmt]
+    | SWhile Expr [Stmt]
+    -- | SForIn VarId Expr Expr [Stmt]
+    | SPrint Expr
+    -- | SReturn Expr
 
 data Expr
     = ENum Int
     | EAdd Expr Expr
     | EMul Expr Expr
     | EEqual Expr Expr
+    | ENot Expr
     | EIfThenElse Expr Expr Expr
-    | EVar EVarId
-    | ELet EVarId Expr Expr
-    | EApp EFunId [Expr]
+    | ELet VarId Expr Expr
+    | EVar    VarId
+    | EApp FunId [Expr]
     deriving (Eq, Show)
 
 
-type EVarId = Char
-type EFunId = String
+type VarId = Char
+type FunId = String
+
+type CompilerState = Map VarId VarIx
+
+newtype Compile a = Compile {runCompile :: State CompilerState (Either String a)}
+    deriving Functor
+
+instance Applicative Compile where
+    pure a = Compile $ pure . pure $ a
+    (Compile sef) <*> (Compile sea) = Compile $ do
+        ef <- sef
+        ea  <- sea
+        pure $ do {f <- ef; a <- ea; pure (f a)}  
+
+instance Monad Compile where
+    return = pure
+    (Compile sea) >>= k = Compile $
+        StateT $ \s -> Identity $ 
+            let (ea, s') = runState sea s in
+            case ea of
+                Left msg -> (Left msg, s')
+                Right a  -> runState (runCompile (k a)) s'
 
 
-compile :: Expr -> Either String Proc
-compile expr =
-    let varNames = findVars expr
-        varIxs = M.fromList $ zip varNames [0..]
-    in if isUnique varNames
-        then Right $ Proc (length varNames) $ (runReader (compile' expr) varIxs) ++ [Ret]
-        else Left $ "Non-unique variable names: " ++ show varNames
+getVars :: Compile (Map VarId VarIx)
+getVars = Compile $ Right <$> get
+
+modifyVars :: ((Map VarId VarIx) -> (Map VarId VarIx)) -> Compile ()
+modifyVars f = Compile $ Right <$> modify f
+
+compileError :: String -> Compile a
+compileError msg = Compile $ pure (Left msg)
+
+
+
+
+compileFull :: [Stmt] -> Either String Proc
+compileFull stmts =
+    let (eops, vars) = (`runState` M.empty) . runCompile$ compile stmts in
+    Proc (length vars) <$> eops
+
+compile :: [Stmt] -> Compile [Op]
+compile = (concat <$>) . mapM compile' 
+    where
+        compile' :: Stmt -> Compile [Op]
+        compile' stmt = case stmt of
+            SNewVar var eVal -> do
+                mix <- getVarIx var
+                case mix of 
+                    Nothing -> do
+                        valCode <- compileExpr eVal
+                        ix <- freshVarIx
+                        newVar var ix
+                        pure $ valCode ++ [Store ix]  
+                    Just ix -> compileError $ "Redeclared variable: " ++ (show var) 
+            SSetVar var eVal -> do
+                mix <- getVarIx var
+                case mix of
+                    Just ix -> do
+                        valCode <- compileExpr eVal
+                        pure $ valCode ++ [Store ix]  
+                    Nothing -> compileError $ "Variable used before declaration: " ++ (show var) 
+            SIfThenElse eCond trueBlock falseBlock -> do
+                condCode  <- compileExpr eCond
+                trueCode  <- compile trueBlock
+                falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compile falseBlock
+                let trueOffset = length falseCode + 1
+                pure $ condCode ++ [JmpRelIf trueOffset] ++ falseCode ++ trueCode
+            SWhile eCond body -> do
+                condCode  <- compileExpr eCond
+                bodyCode  <- compile body
+                let gotoStart = [JmpRel $ negate ((length bodyCode) + (length gotoEnd) + (length condCode))]
+                    gotoEnd   = [Not, JmpRelIf $ (length bodyCode) + (length gotoStart) + 1]
+                pure $ condCode ++ gotoEnd ++ bodyCode ++ gotoStart
+
+
+            -- SPrint eVal ->
+
+getVarIx :: VarId -> Compile (Maybe VarIx)
+getVarIx var = M.lookup var <$> getVars
+
+freshVarIx :: Compile VarIx
+freshVarIx = length <$> getVars
+
+newVar :: VarId -> VarIx -> Compile ()
+newVar var ix = modifyVars (M.insert var ix)
+
 
 isUnique xs = (length xs) == (length $ nub xs)
 
 
-compile' :: Expr -> Reader (Map EVarId VarIx) [Op]
-compile' (ENum n)     = pure [Push n]
-compile' (EAdd a b)   = concat <$> sequence [compile' a, compile' b, pure [Add]  ]
-compile' (EMul a b)   = concat <$> sequence [compile' a, compile' b, pure [Mul]  ]
-compile' (EEqual a b) = concat <$> sequence [compile' a, compile' b, pure [Equal]]
-compile' (EIfThenElse cond etrue efalse) = do
-    condCode  <- compile' cond
-    trueCode  <- compile' etrue
-    falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compile' efalse
+
+compileExpr :: Expr -> Compile [Op]
+compileExpr (ENum n)     = pure [Push n]
+compileExpr (EAdd a b)   = concat <$> sequence [compileExpr a, compileExpr b, pure [Add]  ]
+compileExpr (EMul a b)   = concat <$> sequence [compileExpr a, compileExpr b, pure [Mul]  ]
+compileExpr (EEqual a b) = concat <$> sequence [compileExpr a, compileExpr b, pure [Equal]]
+compileExpr (ENot x) = concat <$> sequence [compileExpr x, pure [Not]]
+compileExpr (EIfThenElse cond etrue efalse) = do
+    condCode  <- compileExpr cond
+    trueCode  <- compileExpr etrue
+    falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compileExpr efalse
     let trueOffset = length falseCode + 1
     pure $ condCode ++ [JmpRelIf trueOffset] ++ falseCode ++ trueCode
-compile' (ELet v expr body) = do
-    exprCode <- compile' expr
-    bodyCode <- compile' body
-    varIx <- askVarIx v
-    pure $ exprCode ++ [Store varIx] ++ bodyCode
-compile' (EVar v) = do 
-    varIx <- askVarIx v
-    pure [Load varIx]
-compile' (EApp f exprs) = do 
-    argsCode <- concat <$> sequence (compile' <$> exprs)
+compileExpr (EVar var) = do 
+    mix <- getVarIx var
+    case mix of
+        Just ix -> pure [Load ix]
+        Nothing -> compileError $ "Variable used before declaration: " ++ (show var) 
+compileExpr (EApp f exprs) = do 
+    argsCode <- concat <$> sequence (compileExpr <$> exprs)
     pure $ argsCode ++ [Call f (length exprs)]
 
 
-askVarIx :: EVarId -> Reader (Map EVarId VarIx) VarIx
-askVarIx var = do vars <- ask; pure $ vars M.! var
 
 
-findVars :: Expr -> [EVarId]
+findVars :: Expr -> [VarId]
 findVars (ELet v expr2 body) = v : ((findVars expr2) ++ (findVars body))
 findVars (EVar v) = []
 findVars (EAdd   a b) = (findVars a) ++ (findVars b)
@@ -153,15 +244,15 @@ step vm@(VM {frames=frame@(VMFrame {instructionPointer=ip, instructions=ops, sta
             (Incr,          (x:stack')  ) -> Right $ frame' {stack = x+1 : stack'} : outerFrames
             (Decr,          (x:stack')  ) -> Right $ frame' {stack = x-1 : stack'} : outerFrames
             (Equal,         (a:b:stack')) -> Right $ frame' {stack = (boolToInt $ a==b) : stack'} : outerFrames
-            (Not,           (b:stack')  ) -> Right $ frame' {stack = (boolToInt $ b/=0) : stack'} : outerFrames
+            (Not,           (b:stack')  ) -> Right $ frame' {stack = (boolToInt . not . intToBool $ b) : stack'} : outerFrames
             (Jmp ip',       _           ) -> Right $ frame' {instructionPointer=ip'}    : outerFrames
             (JmpRel off,    _           ) -> Right $ frame' {instructionPointer=ip+off} : outerFrames
 
-            (JmpIf ip',     (c:stack')  ) -> Right $ if c/=0
+            (JmpIf ip',     (c:stack')  ) -> Right $ if intToBool c
                                                        then frame' {instructionPointer=ip',    stack=stack'} : outerFrames
                                                        else frame' {stack=stack'} : outerFrames
 
-            (JmpRelIf off,  (c:stack')  ) -> Right $ if c/=0
+            (JmpRelIf off,  (c:stack')  ) -> Right $ if intToBool c
                                                        then frame' {instructionPointer=ip+off, stack=stack'} : outerFrames
                                                        else frame' {stack=stack'} : outerFrames
             (Call procId nArgs, stack')
@@ -188,7 +279,8 @@ step vm@(VM {frames=frame@(VMFrame {instructionPointer=ip, instructions=ops, sta
 
       where frame' = frame {instructionPointer = ip+1}
 
-
+intToBool :: Int -> Bool
+intToBool = (/= 0)
 boolToInt :: Bool -> Int
 boolToInt x = if x then 1 else 0 
 
@@ -256,10 +348,17 @@ add1 = Proc 0 [
     Ret
     ]
 
-e4 = (EApp "add1" [e3])
+-- e4 = [(SPrint (EApp "add1" [e3]))]
+
+e4 = [
+    SNewVar 'x' (ENum 5),
+    SNewVar 'y' (ENum 10),
+    (SWhile (ENot (EEqual (EVar 'x') (EVar 'y')))
+        [SSetVar 'x' (EAdd (ENum 1) (EVar 'x'))])
+    ]
 
 main = do
-    case compile e4 of
+    case compileFull e4 of
 
         Left msg -> do
             print msg
