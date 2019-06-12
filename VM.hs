@@ -12,7 +12,7 @@ import qualified Data.List.NonEmpty as N
 import Data.List (nub)
 import Control.Monad.Reader
 import Control.Monad.State
-import Control.Monad.Identity
+import Control.Monad.Trans.Except
 import Control.Monad (forM)
 -- import Data.Either.Combinators (rightToMaybe)
 
@@ -42,78 +42,76 @@ data Expr
 type VarId = Char
 type FunId = String
 
-type CompilerState = Map VarId VarIx
+type VarIxs = Map VarId VarIx
+type CompilerState = VarIxs
 
-newtype Compile a = Compile {runCompile :: State CompilerState (Either String a)}
-    deriving Functor
+type Compile a = ExceptT String (State CompilerState) a
+runCompile = runExceptT
+-- instance Applicative Compile where
+--     pure a = Compile $ pure . pure $ a
+--     (Compile sef) <*> (Compile sea) = Compile $ do
+--         ef <- sef
+--         ea  <- sea
+--         pure $ do {f <- ef; a <- ea; pure (f a)}  
 
-instance Applicative Compile where
-    pure a = Compile $ pure . pure $ a
-    (Compile sef) <*> (Compile sea) = Compile $ do
-        ef <- sef
-        ea  <- sea
-        pure $ do {f <- ef; a <- ea; pure (f a)}  
-
-instance Monad Compile where
-    return = pure
-    (Compile sea) >>= k = Compile $
-        StateT $ \s -> Identity $ 
-            let (ea, s') = runState sea s in
-            case ea of
-                Left msg -> (Left msg, s')
-                Right a  -> runState (runCompile (k a)) s'
+-- instance Monad Compile where
+--     return = pure
+--     (Compile sea) >>= k = Compile $
+--         StateT $ \s -> Identity $ 
+--             let (ea, s') = runState sea s in
+--             case ea of
+--                 Left msg -> (Left msg, s')
+--                 Right a  -> runState (runCompile (k a)) s'
 
 
-getVars :: Compile (Map VarId VarIx)
-getVars = Compile $ Right <$> get
+getVars :: Compile (VarIxs)
+getVars = lift get
 
-modifyVars :: ((Map VarId VarIx) -> (Map VarId VarIx)) -> Compile ()
-modifyVars f = Compile $ Right <$> modify f
+modifyVars :: (VarIxs -> VarIxs) -> Compile ()
+modifyVars f =  lift $ modify f
 
 compileError :: String -> Compile a
-compileError msg = Compile $ pure (Left msg)
+compileError = throwE
 
 
 
 
 compileFull :: [Stmt] -> Either String Proc
 compileFull stmts =
-    let (eops, vars) = (`runState` M.empty) . runCompile$ compile stmts in
+    let (eops, vars) = (`runState` M.empty) . runCompile . compileBlock $ stmts in
     Proc (length vars) <$> eops
 
-compile :: [Stmt] -> Compile [Op]
-compile = (concat <$>) . mapM compile' 
-    where
-        compile' :: Stmt -> Compile [Op]
-        compile' stmt = case stmt of
-            SNewVar var eVal -> do
-                mix <- getVarIx var
-                case mix of 
-                    Nothing -> do
-                        valCode <- compileExpr eVal
-                        ix <- freshVarIx
-                        newVar var ix
-                        pure $ valCode ++ [Store ix]  
-                    Just ix -> compileError $ "Redeclared variable: " ++ (show var) 
-            SSetVar var eVal -> do
-                mix <- getVarIx var
-                case mix of
-                    Just ix -> do
-                        valCode <- compileExpr eVal
-                        pure $ valCode ++ [Store ix]  
-                    Nothing -> compileError $ "Variable used before declaration: " ++ (show var) 
-            SIfThenElse eCond trueBlock falseBlock -> do
-                condCode  <- compileExpr eCond
-                trueCode  <- compile trueBlock
-                falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compile falseBlock
-                let trueOffset = length falseCode + 1
-                pure $ condCode ++ [JmpRelIf trueOffset] ++ falseCode ++ trueCode
-            SWhile eCond body -> do
-                condCode  <- compileExpr eCond
-                bodyCode  <- compile body
-                let gotoStart = [JmpRel $ negate ((length bodyCode) + (length gotoEnd) + (length condCode))]
-                    gotoEnd   = [Not, JmpRelIf $ (length bodyCode) + (length gotoStart) + 1]
-                pure $ condCode ++ gotoEnd ++ bodyCode ++ gotoStart
+compileBlock = (concat <$>) . mapM compileStmt
+
+compileStmt :: Stmt -> Compile [Op]
+compileStmt (SNewVar var eVal) = do
+    mix <- getVarIx var
+    case mix of 
+        Nothing -> do
+            valCode <- compileExpr eVal
+            ix <- freshVarIx
+            newVar var ix
+            pure $ valCode ++ [Store ix]  
+        Just ix -> compileError $ "Redeclared variable: " ++ (show var) 
+compileStmt (SSetVar var eVal) = do
+    mix <- getVarIx var
+    case mix of
+        Just ix -> do
+            valCode <- compileExpr eVal
+            pure $ valCode ++ [Store ix]  
+        Nothing -> compileError $ "Variable used before declaration: " ++ (show var) 
+compileStmt (SIfThenElse eCond trueBlock falseBlock) = do
+    condCode  <- compileExpr eCond
+    trueCode  <- compileBlock trueBlock
+    falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compileBlock falseBlock
+    let trueOffset = length falseCode + 1
+    pure $ condCode ++ [JmpRelIf trueOffset] ++ falseCode ++ trueCode
+compileStmt (SWhile eCond body) = do
+    condCode  <- compileExpr eCond
+    bodyCode  <- compileBlock body
+    let gotoStart = [JmpRel $ negate ((length bodyCode) + (length gotoEnd) + (length condCode))]
+        gotoEnd   = [Not, JmpRelIf $ (length bodyCode) + (length gotoStart) + 1]
+    pure $ condCode ++ gotoEnd ++ bodyCode ++ gotoStart
 
 
             -- SPrint eVal ->
