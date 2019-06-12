@@ -76,12 +76,14 @@ compileError = throwE
 
 
 
-compileFull :: [Stmt] -> Either String Proc
-compileFull stmts =
+compile :: [Stmt] -> Either String Proc
+compile stmts =
     let (eops, vars) = (`runState` M.empty) . runCompile . compileBlock $ stmts in
-    Proc (length vars) <$> eops
+    Proc (length vars) . (++ [Push 0, Ret]) <$> eops 
+
 
 compileBlock = (concat <$>) . mapM compileStmt
+
 
 compileStmt :: Stmt -> Compile [Op]
 compileStmt (SNewVar var eVal) = do
@@ -221,7 +223,7 @@ data Op
     | Call ProcId Int | Ret
     deriving (Eq, Show)
 
-data Ple r a = Error String | Done r | More a
+
 
 step :: VM -> Either String VM
 step (VM {frames=[]}) = Left "No frames remaining, halting"
@@ -295,6 +297,12 @@ runVM vm = go [] vm where
 
 
 
+iterVM :: VM -> [Either String VM]
+iterVM vm = (Right vm) : case step vm of
+                            Right vm' -> iterVM vm'
+                            Left  msg -> [Left msg]
+
+
 _swap = Proc 2 $ [  -- y x
     Store 0,        -- y
     Store 1,        --
@@ -302,7 +310,7 @@ _swap = Proc 2 $ [  -- y x
     Load 1          -- x y
     ]
 
-p1 = Proc 0 $ [
+c1 = Proc 0 $ [
     Push 10,       -- 10
     Push 5,        -- 10 5 
     Add,           -- 15
@@ -316,7 +324,7 @@ p1 = Proc 0 $ [
     Nop
     ]
 
-p2 = Proc (nVars _swap) $ [
+c2 = Proc (nVars _swap) $ [
     Push 3,
     Push 5
     ] ++ code _swap
@@ -348,7 +356,7 @@ add1 = Proc 0 [
 
 -- e4 = [(SPrint (EApp "add1" [e3]))]
 
-e4 = [
+p1 = [
     SNewVar 'x' (ENum 5),
     SNewVar 'y' (ENum 10),
     (SWhile (ENot (EEqual (EVar 'x') (EVar 'y')))
@@ -356,7 +364,7 @@ e4 = [
     ]
 
 main = do
-    case compileFull e4 of
+    case compile p1 of
 
         Left msg -> do
             print msg
@@ -364,11 +372,8 @@ main = do
         Right proc -> do
             showCode $ code proc
             blank
-            let (states, msg) = runVM $  empty { frames = [procFrame proc],
-                                                 procedures = M.fromList [("add1", add1)] }
-            mapM print' $ states
-            blank
-            putStrLn msg
+            let vm = empty { frames = [procFrame proc], procedures = M.fromList [("add1", add1)] }
+            forM_ (iterVM vm) $ either putStrLn print'
 
     where
         print' x = print x >> blank 
