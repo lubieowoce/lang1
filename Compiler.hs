@@ -54,13 +54,21 @@ eConstFalse = ENum 0
 eConstTrue = ENum 1
 
 type VarId = Char
+type FunId = String
 
 type VarIxs = Map VarId VarIx
 type Procs = Map FunId Proc
-type CompilerState = (VarIxs, Procs)
+
+newtype Label = Label {unLabel :: Int} deriving (Eq)
+underLabel f = Label . f . unLabel
+newLabel :: Label -> Label
+newLabel = underLabel (+1)
+instance Show Label where show (Label l) = "label_" ++ (show l)
+
+type CompilerState = (VarIxs, Procs, Label)
 
 emptyCompilerState :: CompilerState
-emptyCompilerState = (M.empty, M.empty)
+emptyCompilerState = (M.empty, M.empty, (Label 0))
 
 type Compile a = ExceptT String (State CompilerState) a
 
@@ -78,7 +86,7 @@ compileError = throwE
 
 
 getVars :: Compile VarIxs
-getVars = fst <$> lift get
+getVars = fst' <$> lift get
 
 putVars :: VarIxs -> Compile ()
 putVars vs = modifyVars (const vs)
@@ -106,7 +114,7 @@ withVars vs ca = do
 
 
 getProcs :: Compile Procs
-getProcs = snd <$> lift get
+getProcs = snd' <$> lift get
 
 getProc :: FunId -> Compile (Maybe Proc)
 getProc funId = M.lookup funId <$> getProcs
@@ -118,10 +126,29 @@ newProc :: FunId -> Proc -> Compile ()
 newProc funId proc = modifyProcs (M.insert funId proc)
 
 
-overFst :: (a -> b) -> (a, x) -> (b, x)
-overFst f (a, x) = (f a, x)
-overSnd :: (a -> b) -> (x, a) -> (x, b)
-overSnd f (x, a) = (x, f a)
+
+modifyLabel :: (Label -> Label) -> Compile ()
+modifyLabel f =  lift $ modify (overThrd f)
+
+getLabel :: Compile Label
+getLabel =  thrd <$> lift get
+
+freshLabel :: Compile Label
+freshLabel = do {l <- getLabel; modifyLabel newLabel; pure l}
+
+
+
+overFst :: (a -> b) -> (a, x, y) -> (b, x, y)
+overFst f (a, x, y) = (f a, x, y)
+overSnd :: (a -> b) -> (x, a, y) -> (x, b, y)
+overSnd f (x, a, y) = (x, f a, y)
+overThrd :: (a -> b) -> (x, y, a) -> (x, y, b)
+overThrd f (x, y, a) = (x, y, f a)
+
+
+fst' (a, _, _) = a
+snd' (_, a, _) = a
+thrd (_, _, a) = a
 
 
 

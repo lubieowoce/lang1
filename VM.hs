@@ -18,6 +18,7 @@ import Data.Void
 type InstructionIx = Int
 type InstructionOffset = Int
 type StackIx = Int
+type VarIx = Int
 type IntVal = Int
 type ProcId = String
 
@@ -41,9 +42,6 @@ data Proc = Proc {
     } deriving (Eq, Show)
 
 
-type VarIx = Int
-type FunId = String
-
 
 
 empty = VM {
@@ -60,7 +58,7 @@ emptyFrame = VMFrame {
     vars = []
 }
 
-data Program = Program {mainProc :: Proc, allProcs :: Map FunId Proc}
+data Program = Program {mainProc :: Proc, allProcs :: Map ProcId Proc}
 
 execProgram :: Program -> VM
 execProgram p = emptyVM { frames = [procFrame (mainProc p)] , procedures=allProcs p}
