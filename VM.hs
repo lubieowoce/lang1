@@ -34,11 +34,14 @@ data Definition
     deriving (Eq, Show)
 
 data Stmt
-    = SNewVar VarId Expr
+    = SPass
+    | SNewVar VarId Expr
     | SSetVar VarId Expr
     | SIfThenElse Expr [Stmt] [Stmt]
     | SWhile Expr [Stmt]
     | SForFromTo VarId Expr Expr [Stmt]
+    | SBreak
+    | SContinue
     | SReturn Expr
     deriving (Eq, Show)
 
@@ -160,10 +163,11 @@ compileDefinition (DDef funId args body) = do
 
 
 compileBlock :: [Stmt] -> Compile [Op]
-compileBlock = (concat <$>) . mapM compileStmt
+compileBlock = ((trace' "block: ") . concat <$>) . mapM compileStmt
 
 
 compileStmt :: Stmt -> Compile [Op]
+compileStmt (SPass) = pure $ [Nop]
 compileStmt (SNewVar var eVal) = do
     mix <- getVarIx var
     case mix of 
@@ -239,7 +243,7 @@ simplifyExpr x = x
 
 
 compileExpr = compileExpr' . simplifyExpr
--- trace' s x = trace (s ++ " " ++ (show x)) x 
+trace' s x = trace (s ++ " " ++ (show x)) x 
 -- compileExpr = compileExpr' . (trace' "simplified: ") . simplifyExpr . (trace' "original:   " )
 
 compileExpr' :: Expr -> Compile [Op]
@@ -609,6 +613,18 @@ p3 = [
         ]
 
     ]
+
+
+p4 = [
+        DDef "main" [] [
+            SNewVar 'i' (ENum 0),
+            SForFromTo 'i' (ENum 1) (ENum 4) [
+                SIfThenElse (EEqual (EVar 'i') (ENum 2)) [SContinue] [SPass]
+            ],
+            SReturn (EVar 'i')
+        ]
+
+     ]
 
 main = do
     -- let DDef funId args body = defAdd1 in
