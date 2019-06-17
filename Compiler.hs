@@ -5,6 +5,9 @@ import VM
 import Data.Map (Map)
 import qualified Data.Map as M
 
+import Data.Set (Set)
+import qualified Data.Set as S
+
 import Data.List (nub, intersperse)
 import Data.Maybe (fromJust, isJust)
 
@@ -24,8 +27,21 @@ import Debug.Trace (trace)
 
 data Definition
     = DDef FunId [VarId] [Stmt]
-    deriving (Eq, Show)
+    deriving (Eq)
 
+instance Show Definition where
+    show (DDef funId vars body) =
+        "func " ++ funId ++ (parens . joinWith ", " . map showVarId $ vars) ++ " " ++ (showBlock body)
+
+
+showBlock :: [Stmt] -> String
+showBlock b = "{\n" ++ (joinWith "" . map indent' . map show $ b) ++ "}\n"
+
+
+indent' = unlines . map indent . lines
+
+joinWith :: String -> [String] -> String
+joinWith sep = concat . intersperse sep
 data Stmt
     = SPass
     | SNewVar VarId Expr
@@ -36,7 +52,21 @@ data Stmt
     | SBreak
     | SContinue
     | SReturn Expr
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show Stmt where
+    show (SPass) = "pass"
+    show (SNewVar var expr) = (showVarId var) ++ " := " ++ (show expr)
+    show (SSetVar var expr) = (showVarId var) ++=++ (show expr)
+    show (SIfThenElse cond trueBody falseBody) = 
+        "if " ++ (show cond) ++ " " ++ (showBlock trueBody) ++ "else " ++ (showBlock falseBody)
+    show (SWhile cond body) = 
+        "while " ++ (show cond) ++ " " ++ (showBlock body)
+    show (SForFromTo var low high body) = 
+        "for " ++ (showVarId var) ++ " in [" ++ (show low) ++ " .. " ++ (show high) ++ "] " ++ (showBlock body)
+    show (SBreak) = "break"
+    show (SContinue) = "continue"
+    show (SReturn expr) = "return " ++ (show expr)
 
 data Expr
     = ENum Int
@@ -218,25 +248,70 @@ graphLabels = map fst . M.toList . nodes
 
 
 
-data FlowNode l
-    = Block {body :: [BasicStmt], next :: l}
-    | IfThenElse {cond :: Expr, ifTrue, ifFalse :: l}
-    | Return {expr :: Expr}
-    deriving (Eq, Show)
-
-data BasicStmt
-    = BSetVar VarId Expr
-    deriving (Eq)
-
-instance Show BasicStmt where
-    show (BSetVar v x) = (showVarId v) ++ " = " ++ (show x)
-
 data Ctx l
     = BlockCtx {end :: l}
     | LoopCtx  {cont, end :: l}
 
+
+data FlowNode l
+    = Block {body :: [BasicStmt], next :: l}
+    | IfThenElse {cond :: BasicExpr, ifTrue, ifFalse :: l}
+    | Return {expr :: BasicExpr}
+    deriving (Eq, Show)
+
+data BasicExpr
+    = BVar VarId
+    | BNum Int
+    deriving (Eq)
+
+
+instance Show BasicExpr where
+    show (BVar v) = showVarId v
+    show (BNum n) = show n
+
+data BasicStmt
+    = BSetVar VarId BasicExpr 
+    | BAdd    VarId BasicExpr BasicExpr
+    | BMul    VarId BasicExpr BasicExpr
+    | BSub    VarId BasicExpr BasicExpr
+    | BEqual  VarId BasicExpr BasicExpr
+    | BNot    VarId BasicExpr
+    | BApp    VarId FunId [BasicExpr]
+    deriving (Eq)
+
+instance Show BasicStmt where
+    show (BSetVar v x) = (showVarId v) ++=++ (show x)
+    show (BAdd   v a b) = (showVarId v) ++=++ (show a) ++ " + "  ++ (show b)
+    show (BMul   v a b) = (showVarId v) ++=++ (show a) ++ " * "  ++ (show b)
+    show (BSub   v a b) = (showVarId v) ++=++ (show a) ++ " - "  ++ (show b)
+    show (BEqual v a b) = (showVarId v) ++=++ (show a) ++ " == " ++ (show b)
+    show (BNot   v x)   = (showVarId v) ++=++ "!" ++ (show x)
+    show (BApp    v f exprs) = (showVarId v) ++=++ (f ++ (parens . concat . intersperse ", " . map show $ exprs))
+
+
+a ++=++ b = a ++ " = " ++ b
+
+
+toBasicExpr :: Expr -> Compile (BasicExpr, [BasicStmt])
+toBasicExpr (ENum n)     = pure (BNum n, [])
+toBasicExpr (EAdd a b)   = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BAdd   t v1 v2])
+toBasicExpr (EMul a b)   = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BMul   t v1 v2])
+toBasicExpr (ESub a b)   = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BSub   t v1 v2])
+toBasicExpr (EEqual a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BEqual t v1 v2])
+toBasicExpr (ENot x)     = do (v1, s1) <- toBasicExpr x; t <- freshVarId; pure (BVar t, s1 ++ [BNot t v1])
+toBasicExpr (EVar v) = pure (BVar v, [])
+toBasicExpr (EApp fun exprs) = do
+    xs <- mapM toBasicExpr exprs
+    let vars  = map fst xs
+    let temps = concat $ map snd xs
+    t <- freshVarId
+    pure (BVar t, temps ++ [BApp t fun vars])
+
+
+
 snoc :: [a] -> a -> [a]
 snoc xs x = xs ++ [x]
+
 
 flowGraph :: Definition -> Compile (Label, FlowGraph Label)
 flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
@@ -252,40 +327,47 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 go ctxs graph stmts
             SNewVar var expr -> do
                 l <- freshLabel
-                (next, graph') <- go ctxs graph stmts
-                let node = Block [BSetVar var expr] next
-                pure $ (l, insertNode l node graph')
+                (expr', computeExpr, graph) <- computeBlock expr graph l
+                (next, graph) <- go ctxs graph stmts
+                let node = Block [BSetVar var expr'] next
+                pure $ (computeExpr, insertNode l node graph)
             SSetVar var expr -> do
                 l <- freshLabel
-                (next, graph') <- go ctxs graph stmts
-                let node = Block [BSetVar var expr] next
-                pure $ (l, insertNode l node graph')
+                (expr', computeExpr, graph) <- computeBlock expr graph l
+                (next, graph) <- go ctxs graph stmts
+                let node = Block [BSetVar var expr'] next
+                pure $ (computeExpr, insertNode l node graph)
             SIfThenElse cond trueBody falseBody -> do
-                l <- freshLabel
-                (next, graph') <- go ctxs graph stmts
+                ifCond <- freshLabel
+                (condExpr, computeCond, graph) <- computeBlock cond graph ifCond 
+                (next, graph) <- go ctxs graph stmts
                 let ctxs' = BlockCtx {end=next} : ctxs
-                (trueCont,  graph'')  <- go ctxs' graph'  trueBody
-                (falseCont, graph''') <- go ctxs' graph'' falseBody
-                let node = IfThenElse {cond=cond, ifTrue=trueCont, ifFalse=falseCont}
-                pure $ (l, insertNode l node graph''')
+                (trueCont,  graph) <- go ctxs' graph trueBody
+                (falseCont, graph) <- go ctxs' graph falseBody
+                let ifCondNode      = IfThenElse {cond=condExpr, ifTrue=trueCont, ifFalse=falseCont}
+                pure $ (computeCond, insertNode ifCond ifCondNode graph)
             SWhile cond body -> do
-                l <- freshLabel
-                (next, graph') <- go ctxs graph stmts
-                let ctxs' = LoopCtx {cont=l, end=next} : ctxs
-                (bodyCont,  graph'') <- go ctxs' graph' body
-                let node = IfThenElse {cond=cond, ifTrue=bodyCont, ifFalse=next}
-                pure $ (l, insertNode l node graph'')
+                ifCond <- freshLabel
+                (condExpr, computeCond, graph) <- computeBlock cond graph ifCond 
+                (next, graph) <- go ctxs graph stmts
+                let ctxs' = LoopCtx {cont=computeCond, end=next} : ctxs
+                (bodyCont,  graph) <- go ctxs' graph body
+                let node = IfThenElse {cond=condExpr, ifTrue=bodyCont, ifFalse=next}
+                pure $ (computeCond, insertNode ifCond node graph)
             SForFromTo var low high body -> do
                 loopInit <- freshLabel
+                (initExpr, computeInit, graph) <- computeBlock low graph loopInit 
                 loopIf   <- freshLabel
+                (condExpr, computeCond, graph) <- computeBlock (ENot (EEqual (EVar var) high)) graph loopIf
                 loopIncr <- freshLabel
-                (next, graph') <- go ctxs graph stmts
-                let ctxs' = LoopCtx {cont=loopIncr, end=next} : ctxs
-                (bodyCont,  graph'') <- go ctxs' graph' body
-                let incrNode = Block [BSetVar var (EAdd (EVar var) (ENum 1))] loopIf
-                    ifNode   = IfThenElse {cond=(ENot (EEqual (EVar var) high)), ifTrue=bodyCont, ifFalse=next}
-                    initNode = Block [BSetVar var low] loopIf
-                pure $ (loopInit, insertNodes [(loopInit, initNode), (loopIf, ifNode), (loopIncr, incrNode)] graph'')
+                (incrExpr, computeIncr, graph) <- computeBlock (EAdd (EVar var) (ENum 1)) graph loopIncr
+                (next, graph) <- go ctxs graph stmts
+                let ctxs' = LoopCtx {cont=computeIncr, end=next} : ctxs
+                (bodyCont,  graph) <- go ctxs' graph body
+                let incrNode = Block [BSetVar var incrExpr] computeCond
+                    ifNode   = IfThenElse {cond=condExpr, ifTrue=bodyCont, ifFalse=next}
+                    initNode = Block [BSetVar var initExpr] computeCond
+                pure $ (computeInit, insertNodes [(loopInit, initNode), (loopIf, ifNode), (loopIncr, incrNode)] graph)
             SBreak -> do 
                 end <- findLoopEnd ctxs `orError` "break outside of loop"
                 pure $ (end, graph)
@@ -294,13 +376,24 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 pure $ (cont, graph)
             SReturn expr -> do
                 l <- freshLabel
-                let node = Return expr
-                pure $ (l, insertNode l node graph)
+                (expr', computeExpr, graph) <- computeBlock expr graph l 
+                let node = Return expr'
+                pure $ (computeExpr, insertNode l node graph)
+
+    computeBlock :: Expr -> FlowGraph Label -> Label -> Compile (BasicExpr, Label, FlowGraph Label)
+    computeBlock expr graph next = do
+        computeExpr <- freshLabel
+        (expr', temps) <- toBasicExpr expr
+        pure $ if not . null $ temps
+                   then (expr', computeExpr, insertNode computeExpr (Block temps next) graph )
+                   else (expr', next, graph)
+
     findLoopEnd [] = Nothing
     findLoopEnd (ctx:ctxs) =
         case ctx of
             LoopCtx {end=e} -> Just e
             _                -> findLoopEnd ctxs
+            
     findLoopCont [] = Nothing
     findLoopCont (ctx:ctxs) =
         case ctx of
@@ -316,6 +409,7 @@ continuesTo target n = case n of
     Block {next=next} -> next == target
     IfThenElse {ifTrue=ifTrue, ifFalse=ifFalse} -> ifTrue == target || ifFalse == target
     Return {} -> False
+
 
 
 joinBlocks :: FlowGraph Label -> FlowGraph Label
@@ -336,22 +430,91 @@ joinBlocks g = (`execState` g) $ do
                 _ -> pure ()
 
 
-pleple :: Expr -> Compile (VarId, [String])
-pleple (ENum n) = do t <- freshVarId; pure (t, [t +=+ (show n)])
-pleple (EAdd a b)   = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
-pleple (EMul a b)   = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
-pleple (ESub a b)   = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
-pleple (EEqual a b) = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
-pleple (ENot x) = do (v1, s1) <- pleple x; t <- freshVarId; pure (t, s1 ++ [t +=+ ("! " ++ v1)])
-pleple (EVar v) = pure (v, [])
-pleple (EApp fun exprs) = do
-    xs <- mapM pleple exprs
-    let vars  = map fst xs
-    let temps = concat $ map snd xs
-    t <- freshVarId
-    pure (t, temps ++ [t +=+ (fun ++ (parens . concat . intersperse ", " $ vars))])
 
-a +=+ b = a ++ " = " ++ b
+
+linearizeGraph :: Label -> FlowGraph Label -> [Label]
+linearizeGraph entry graph = snd $ go S.empty entry [] where
+    go visited label acc 
+        | (S.size visited) == (M.size $ nodes graph)   =  (visited, acc)
+        | otherwise =
+            case getNode label graph of
+                Block {body=body, next=next} ->
+                    -- go (S.insert label visited) next (acc `snoc` label)
+                    undefined
+                IfThenElse {ifTrue=ifTrue, ifFalse=ifFalse} ->
+                    undefined
+                    -- go (S.insert label visited) ifTrue (acc ++ [ifTrue, ifFalse])
+                Return {expr=expr} -> do
+                    undefined
+
+
+joinPoints :: FlowGraph Label -> [(Label, Label, Label)]
+joinPoints g = undefined
+
+
+findVars :: FlowGraph Label -> [VarId]
+findVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock . map snd . M.toList . nodes
+    where
+        basicStmtVars (BSetVar v x)  = v : basicExprVars x 
+        basicStmtVars (BAdd   v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BMul   v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BSub   v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BEqual v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BNot   v x)   = v : (basicExprVars x)
+        basicStmtVars (BApp   v f exprs) = v : (concat . map basicExprVars $ exprs)
+
+        basicExprVars (BVar v) = [v]
+        basicExprVars (BNum _) = []
+
+        isBlock (Block {}) = True
+        isBlock _          = False
+
+        
+     
+        
+
+compileDefinition' :: Definition -> Compile Proc
+compileDefinition' def@(DDef funId args body) = do
+    (entry, graph) <- flowGraph def
+    forM_ (findVars graph) $ \var ->
+        freshVarIx >>= newVar var
+    storeArgs <- forM args (\arg -> (Store . fromJust) <$> getVarIx arg)
+    bodyCode  <- compileGraph entry graph
+    let nArgs = length args
+    nVars <- length <$> getVars
+    pure $ Proc nArgs nVars (storeArgs ++ bodyCode)
+
+
+compileGraph :: Label -> FlowGraph Label -> Compile [Op]
+compileGraph entry graph = do
+    case getNode entry graph of
+        Block {body=body, next=next} -> do
+            -- bodyCode <- concat <$> mapM compileBasicStmt body
+            -- pure $ bodyCode `snoc` Jmp next
+            undefined
+        IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse} -> do
+            -- condCode <- compileBasicExpr cond
+            undefined
+        Return {expr=expr} -> do
+            undefined
+
+
+-- compileBasicStmt :: BasicStmt -> Compile [Op]
+-- compileBasicStmt (BSetVar v x)  = do ix <- getVarIx v; pure [compileBasicExpr x, Store ix]
+-- compileBasicStmt (BAdd   v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Add,   Store ix]
+-- compileBasicStmt (BMul   v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Mul,   Store ix]
+-- compileBasicStmt (BSub   v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Sub,   Store ix]
+-- compileBasicStmt (BEqual v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Equal, Store ix]
+-- compileBasicStmt (BNot   v x)   = do ix <- getVarIx v; pure [compileBasicExpr x, Not, Store ix]
+-- compileBasicStmt (BApp   v f exprs) = do ecode <- mapM_ compileBasicExpr exprs; ix <- getVarIx v; pure $ ecode ++ [Call f (length exprs), Store ix]
+
+-- compileBasicExpr :: BasicExpr -> Compile Op
+-- compileBasicExpr (BVar v) = Load <$> (getVarIx v `orError` "undefined variable" ++ (showVarId v))
+-- compileBasicExpr (BNum n) = pure $ Push n
+
+
+
+
 
 compileDefinition :: Definition -> Compile Proc
 compileDefinition (DDef funId args body) = do
@@ -523,15 +686,12 @@ p1 = [
 
 p2 = DDef "fib" ["i"] [
         SNewVar "j" (ENum 0),
-        SPass,
         SNewVar "a" (ENum 1), SNewVar "b" (ENum 1), SNewVar "c" (ENum 0),
         SForFromTo "j" (ENum 0) (ESub (EVar "i") (ENum 1)) [
-            SPass,
             SSetVar "c" (EAdd (EVar "a") (EVar "b")),
             SSetVar "a" (EVar "b"),
             SSetVar "b" (EVar "c")
         ],
-        SPass,
         SReturn (EVar "a")
     ]
 
@@ -552,10 +712,13 @@ main = either (putStrLn . ("Error: "++)) pure  =<<  (runExceptT mainE)
 
 mainE :: ExceptT String IO ()
 mainE = do
-    (_, vars) <- ExceptT . pure $ evalCompile (pleple e1)
-    lift $ mapM_ putStrLn vars
+    (_, vars) <- ExceptT . pure $ evalCompile (toBasicExpr e1)
+    lift $ mapM_ print vars
     lift $ blank
-    (start, g1) <- ExceptT . pure $ evalCompile (flowGraph p2)
+    let prog = p2
+    lift $ print $ prog
+    lift $ blank
+    (start, g1) <- ExceptT . pure $ evalCompile (flowGraph prog)
     let g2 = joinBlocks g1
     lift $ putStrLn $ "-> " ++ (show start)
     lift $ mapM_ (uncurry printNode) . M.toList . nodes $ g1
@@ -575,4 +738,6 @@ mainE = do
             putStrLn $ (show l) ++ ":"
             mapM_ (putStrLn . indent . show) body
             putStrLn $ "  -> " ++ (show next) 
-        indent = ("  "++)
+
+
+indent = ("  "++)
