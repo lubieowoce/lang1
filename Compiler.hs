@@ -63,13 +63,13 @@ instance Show Expr where
     show (EApp fun exprs) = fun ++ (parens . concat . intersperse ", " . map show $ exprs)
 
 parens s = "(" ++ s ++ ")"
-showVarId v = v:[]
+showVarId v = v
 
 
 eConstFalse = ENum 0
 eConstTrue = ENum 1
 
-type VarId = Char
+type VarId = String
 type FunId = String
 
 
@@ -78,14 +78,15 @@ type Procs = Map FunId Proc
 
 newtype Label = Label {unLabel :: Int} deriving (Eq, Ord)
 underLabel f = Label . f . unLabel
+asLabel f = unLabel . f . Label
 newLabel :: Label -> Label
 newLabel = underLabel (+1)
 instance Show Label where show (Label l) = "L" ++ (show l)
 
-type CompilerState = (VarIxs, Procs, Label)
+type CompilerState = (VarIxs, Procs, Int)
 
 emptyCompilerState :: CompilerState
-emptyCompilerState = (M.empty, M.empty, (Label 0))
+emptyCompilerState = (M.empty, M.empty, 0)
 
 type Compile a = ExceptT String (State CompilerState) a
 
@@ -146,15 +147,25 @@ newProc :: FunId -> Proc -> Compile ()
 newProc funId proc = modifyProcs (M.insert funId proc)
 
 
+getFresh :: Compile Int
+getFresh = thrd <$> lift get
 
-modifyLabel :: (Label -> Label) -> Compile ()
-modifyLabel f =  lift $ modify (overThrd f)
+modifyFresh :: (Int -> Int) -> Compile ()
+modifyFresh f = modify (overThrd f) 
 
-getLabel :: Compile Label
-getLabel =  thrd <$> lift get
+fresh :: Compile Int
+fresh = do {x <- getFresh; modifyFresh (+1); pure x}
+
 
 freshLabel :: Compile Label
-freshLabel = do {l <- getLabel; modifyLabel newLabel; pure l}
+freshLabel = Label <$> fresh
+
+
+toVarId :: Int -> VarId
+toVarId = ("_t_" ++) . show
+
+freshVarId :: Compile VarId
+freshVarId = toVarId <$> fresh
 
 
 
@@ -325,7 +336,22 @@ joinBlocks g = (`execState` g) $ do
                 _ -> pure ()
 
 
+pleple :: Expr -> Compile (VarId, [String])
+pleple (ENum n) = do t <- freshVarId; pure (t, [t +=+ (show n)])
+pleple (EAdd a b)   = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
+pleple (EMul a b)   = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
+pleple (ESub a b)   = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
+pleple (EEqual a b) = do (v1, s1) <- pleple a; (v2, s2) <- pleple b; t <- freshVarId; pure (t, s1 ++ s2 ++ [t +=+ (v1 ++ " + " ++ v2)])
+pleple (ENot x) = do (v1, s1) <- pleple x; t <- freshVarId; pure (t, s1 ++ [t +=+ ("! " ++ v1)])
+pleple (EVar v) = pure (v, [])
+pleple (EApp fun exprs) = do
+    xs <- mapM pleple exprs
+    let vars  = map fst xs
+    let temps = concat $ map snd xs
+    t <- freshVarId
+    pure (t, temps ++ [t +=+ (fun ++ (parens . concat . intersperse ", " $ vars))])
 
+a +=+ b = a ++ " = " ++ b
 
 compileDefinition :: Definition -> Compile Proc
 compileDefinition (DDef funId args body) = do
@@ -476,42 +502,49 @@ isUnique xs = (length xs) == (length $ nub xs)
 
 
 
+e1 = (EAdd
+        (ENum 3)
+        (EMul
+            (ENum 2)
+            (ENum 2)))
+
+
 p1 = [
-        SIfThenElse (EEqual (EVar 'x') (EVar 'y')) [
-            SSetVar 'x' (EAdd (EVar 'x') (ENum 1)),
-            SSetVar 'x' (EAdd (EVar 'x') (ENum 1))
+        SIfThenElse (EEqual (EVar "x") (EVar "y")) [
+            SSetVar "x" (EAdd (EVar "x") (ENum 1)),
+            SSetVar "x" (EAdd (EVar "x") (ENum 1))
         ] [
-            SReturn (EVar 'y')
+            SReturn (EVar "y")
         ],
-        SReturn (EVar 'x')
+        SReturn (EVar "x")
     ]
 
 
 
-p2 = DDef "fib" ['i'] [
-        SNewVar 'j' (ENum 0),
+p2 = DDef "fib" ["i"] [
+        SNewVar "j" (ENum 0),
         SPass,
-        SNewVar 'a' (ENum 1), SNewVar 'b' (ENum 1), SNewVar 'c' (ENum 0),
-        SForFromTo 'j' (ENum 0) (ESub (EVar 'i') (ENum 1)) [
+        SNewVar "a" (ENum 1), SNewVar "b" (ENum 1), SNewVar "c" (ENum 0),
+        SForFromTo "j" (ENum 0) (ESub (EVar "i") (ENum 1)) [
             SPass,
-            SSetVar 'c' (EAdd (EVar 'a') (EVar 'b')),
-            SSetVar 'a' (EVar 'b'),
-            SSetVar 'b' (EVar 'c')
+            SSetVar "c" (EAdd (EVar "a") (EVar "b")),
+            SSetVar "a" (EVar "b"),
+            SSetVar "b" (EVar "c")
         ],
         SPass,
-        SReturn (EVar 'a')
+        SReturn (EVar "a")
     ]
 
 
 p3 = DDef "ple" [] [
-        SNewVar 'x' (ENum 0),
-        SNewVar 'i' (ENum 0), SNewVar 'j' (ENum 0),
-        SForFromTo 'i' (ENum 1) (ENum 10) [
-            SForFromTo 'j' (ENum 1) (ENum 10) [
-                SSetVar 'x' (EAdd (EVar 'x') (EAdd (EVar 'i') (EVar 'j')))
+        SNewVar "x" (ENum 0),
+        SNewVar "i" (ENum 0), SNewVar "j" (ENum 0),
+        SForFromTo "i" (ENum 1) (ENum 10) [
+            SForFromTo "j" (ENum 1) (ENum 10) [
+                SSetVar "x" (EAdd (EVar "x") (EAdd (EVar "i") (EVar "j")))
             ]
         ],
-        SReturn (EVar 'x')
+        SReturn (EVar "x")
     ]
 
 
@@ -519,6 +552,9 @@ main = either (putStrLn . ("Error: "++)) pure  =<<  (runExceptT mainE)
 
 mainE :: ExceptT String IO ()
 mainE = do
+    (_, vars) <- ExceptT . pure $ evalCompile (pleple e1)
+    lift $ mapM_ putStrLn vars
+    lift $ blank
     (start, g1) <- ExceptT . pure $ evalCompile (flowGraph p2)
     let g2 = joinBlocks g1
     lift $ putStrLn $ "-> " ++ (show start)
@@ -529,7 +565,6 @@ mainE = do
     where
         blank = putStrLn "\n" 
         fromRight (Right x) = x 
-
         printNode l (IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse}) = do
             putStrLn $ (show l) ++ ": " ++ " if " ++ (show cond) ++ ""
             putStrLn . indent $ "then -> " ++ (show ifTrue)

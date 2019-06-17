@@ -1,6 +1,6 @@
 module Main where
 
-import Compiler
+import Compiler (Expr (..), Stmt (..), Definition (..), compileProgram, evalCompile)
 import VM
 
 import Data.Map (Map)
@@ -79,24 +79,24 @@ e2 = (EAdd
 
 e3 = (EAdd
         (ENum 1)
-        (ELet 'x' (EMul (ENum 2) (ENum 2))
-            (ELet 'y' (EMul (ENum 3) (ENum 3))
-                (EAdd (EVar 'x') (EVar 'y')) )))
+        (ELet "x" (EMul (ENum 2) (ENum 2))
+            (ELet "y" (EMul (ENum 3) (ENum 3))
+                (EAdd (EVar "x") (EVar "y")) )))
 
 
 p2 = [
 
-        DDef "add1" ['a'] [
-            SReturn (EAdd (EVar 'a') (ENum 1))
+        DDef "add1" ["a"] [
+            SReturn (EAdd (EVar "a") (ENum 1))
         ],
 
         DDef "main" [] [
-            SNewVar 'x' (ENum 5),
-            SNewVar 'y' (ENum 10),
-            SWhile (ENot (EEqual (EVar 'x') (EVar 'y'))) [
-                SSetVar 'x' (EApp "add1" [(EVar 'x')])
+            SNewVar "x" (ENum 5),
+            SNewVar "y" (ENum 10),
+            SWhile (ENot (EEqual (EVar "x") (EVar "y"))) [
+                SSetVar "x" (EApp "add1" [(EVar "x")])
             ],
-            SReturn (EVar 'x')
+            SReturn (EVar "x")
         ]
     
     ]
@@ -117,16 +117,16 @@ p3 = [
         }
         -}
 
-        -- DDef "fib" ['i'] [
-        --     SNewVar 'j' (ENum 0),
-        --     SNewVar 'a' (ENum 1), SNewVar 'b' (ENum 1), SNewVar 'c' (ENum 0),
-        --     SWhile (ENot (EEqual (EVar 'j') (EVar 'i'))) [
-        --         SSetVar 'c' (EAdd (EVar 'a') (EVar 'b')),
-        --         SSetVar 'a' (EVar 'b'),
-        --         SSetVar 'b' (EVar 'c'),
-        --         SSetVar 'j' (EAdd (EVar 'j') (ENum 1))
+        -- DDef "fib" ["i"] [
+        --     SNewVar "j" (ENum 0),
+        --     SNewVar "a" (ENum 1), SNewVar "b" (ENum 1), SNewVar "c" (ENum 0),
+        --     SWhile (ENot (EEqual (EVar "j") (EVar "i"))) [
+        --         SSetVar "c" (EAdd (EVar "a") (EVar "b")),
+        --         SSetVar "a" (EVar "b"),
+        --         SSetVar "b" (EVar "c"),
+        --         SSetVar "j" (EAdd (EVar "j") (ENum 1))
         --     ],
-        --     SReturn (EVar 'a')
+        --     SReturn (EVar "a")
         -- ],
 
         {-
@@ -142,15 +142,15 @@ p3 = [
         }
         -}
 
-        DDef "fib" ['i'] [
-            SNewVar 'j' (ENum 0),
-            SNewVar 'a' (ENum 1), SNewVar 'b' (ENum 1), SNewVar 'c' (ENum 0),
-            SForFromTo 'j' (ENum 0) (ESub (EVar 'i') (ENum 1)) [
-                SSetVar 'c' (EAdd (EVar 'a') (EVar 'b')),
-                SSetVar 'a' (EVar 'b'),
-                SSetVar 'b' (EVar 'c')
+        DDef "fib" ["i"] [
+            SNewVar "j" (ENum 0),
+            SNewVar "a" (ENum 1), SNewVar "b" (ENum 1), SNewVar "c" (ENum 0),
+            SForFromTo "j" (ENum 0) (ESub (EVar "i") (ENum 1)) [
+                SSetVar "c" (EAdd (EVar "a") (EVar "b")),
+                SSetVar "a" (EVar "b"),
+                SSetVar "b" (EVar "c")
             ],
-            SReturn (EVar 'a')
+            SReturn (EVar "a")
         ],
 
         {-
@@ -168,11 +168,11 @@ p3 = [
 
 p4 = [
         DDef "main" [] [
-            SNewVar 'i' (ENum 0),
-            SForFromTo 'i' (ENum 1) (ENum 4) [
-                SIfThenElse (EEqual (EVar 'i') (ENum 2)) [SContinue] [SPass]
+            SNewVar "i" (ENum 0),
+            SForFromTo "i" (ENum 1) (ENum 4) [
+                SIfThenElse (EEqual (EVar "i") (ENum 2)) [SContinue] [SPass]
             ],
-            SReturn (EVar 'i')
+            SReturn (EVar "i")
         ]
 
      ]
