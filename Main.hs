@@ -71,17 +71,17 @@ e1 = (EAdd
             (ENum 2)))
 
 
-e2 = (EAdd
-        (ENum 3)
-        (EIfThenElse (EEqual (ENum 1) (ENum 2))
-            (EMul (ENum 2) (ENum 2))
-            (EMul (ENum 3) (ENum 3))))
+-- e2 = (EAdd
+--         (ENum 3)
+--         (EIfThenElse (EEqual (ENum 1) (ENum 2))
+--             (EMul (ENum 2) (ENum 2))
+--             (EMul (ENum 3) (ENum 3))))
 
-e3 = (EAdd
-        (ENum 1)
-        (ELet "x" (EMul (ENum 2) (ENum 2))
-            (ELet "y" (EMul (ENum 3) (ENum 3))
-                (EAdd (EVar "x") (EVar "y")) )))
+-- e3 = (EAdd
+--         (ENum 1)
+--         (ELet "x" (EMul (ENum 2) (ENum 2))
+--             (ELet "y" (EMul (ENum 3) (ENum 3))
+--                 (EAdd (EVar "x") (EVar "y")) )))
 
 
 p2 = [

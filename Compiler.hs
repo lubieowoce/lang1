@@ -86,10 +86,10 @@ data Expr
     | ELessEqual Expr Expr
     | EGreaterEqual Expr Expr
     | ENot Expr
-    | EIfThenElse Expr Expr Expr
-    | ELet VarId Expr Expr
     | EVar VarId
     | EApp FunId [Expr]
+    -- | EIfThenElse Expr Expr Expr
+    -- | ELet VarId Expr Expr
     deriving (Eq)
 
 instance Show Expr where
