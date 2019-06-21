@@ -372,7 +372,7 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 (highExpr, computeHigh, graph) <- computeBlock high graph loopInit
                 (lowExpr, computeLow, graph) <- computeBlock low graph computeHigh
                 loopIf   <- freshLabel
-                (condExpr, computeCond, graph) <- computeBlock (ENot (EEqual (EVar var) (EAdd (toExpr highExpr) (ENum 1)))) graph loopIf
+                (condExpr, computeCond, graph) <- computeBlock (ELessEqual (EVar var) (toExpr highExpr)) graph loopIf
                 loopIncr <- freshLabel
                 (incrExpr, computeIncr, graph) <- computeBlock (EAdd (EVar var) (ENum 1)) graph loopIncr
                 (next, graph) <- go ctxs graph stmts
