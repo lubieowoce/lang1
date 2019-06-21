@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveFunctor #-}
+
 module Compiler where
 import VM
 -- import Graph
@@ -8,7 +10,7 @@ import qualified Data.Map as M
 import Data.Set (Set)
 import qualified Data.Set as S
 
-import Data.List (nub, intersperse)
+import Data.List (nub, intersperse, elemIndex)
 import Data.Maybe (fromJust, isJust)
 
 import Control.Monad.Reader
@@ -257,7 +259,7 @@ data FlowNode l
     = Block {body :: [BasicStmt], next :: l}
     | IfThenElse {cond :: BasicExpr, ifTrue, ifFalse :: l}
     | Return {expr :: BasicExpr}
-    deriving (Eq, Show)
+    deriving (Eq, Show, Functor)
 
 data BasicExpr
     = BVar VarId
@@ -432,24 +434,40 @@ joinBlocks g = (`execState` g) $ do
 
 
 
-linearizeGraph :: Label -> FlowGraph Label -> [Label]
-linearizeGraph entry graph = snd $ go S.empty entry [] where
-    go visited label acc 
-        | (S.size visited) == (M.size $ nodes graph)   =  (visited, acc)
-        | otherwise =
-            case getNode label graph of
-                Block {body=body, next=next} ->
-                    -- go (S.insert label visited) next (acc `snoc` label)
-                    undefined
-                IfThenElse {ifTrue=ifTrue, ifFalse=ifFalse} ->
-                    undefined
-                    -- go (S.insert label visited) ifTrue (acc ++ [ifTrue, ifFalse])
-                Return {expr=expr} -> do
-                    undefined
+depthFirst :: Label -> FlowGraph Label -> [Label]
+depthFirst entry graph = (`evalState` S.empty) $ go entry where
+    go :: Label -> State (Set Label) [Label]
+    go label = do
+        visited <- get
+        if label `S.member` visited
+            then pure $ []
+            else do
+                modify (S.insert label)
+                case getNode label graph of
+                    Block {body=body, next=next} -> do
+                        ordered <- go next
+                        pure $ label : ordered
+                    IfThenElse {ifTrue=ifTrue, ifFalse=ifFalse} -> do
+                        ordered  <- go ifTrue
+                        ordered' <- go ifFalse
+                        pure $ label : (ordered ++ ordered')
+                    Return {expr=expr} -> do
+                        pure $ [label]
 
 
-joinPoints :: FlowGraph Label -> [(Label, Label, Label)]
-joinPoints g = undefined
+depthFirstNodes :: Label -> FlowGraph Label -> [(Label, FlowNode Label)]
+depthFirstNodes entry graph = map (\l -> (l, getNode l graph)) $ depthFirst entry graph
+
+
+
+renameLabels :: [Label] -> FlowGraph Label -> FlowGraph Label
+renameLabels order graph = overNodes (M.fromList . map rename . M.toList) $ graph where
+    rename (label, node) = (newLabel label, fmap newLabel node)
+    newLabel l = Label . fromJust $ elemIndex l order
+
+
+depthFirstReorder :: Label -> FlowGraph Label -> FlowGraph Label
+depthFirstReorder entry graph = let order = depthFirst entry graph in renameLabels order graph
 
 
 findVars :: FlowGraph Label -> [VarId]
@@ -720,11 +738,12 @@ mainE = do
     lift $ blank
     (start, g1) <- ExceptT . pure $ evalCompile (flowGraph prog)
     let g2 = joinBlocks g1
-    lift $ putStrLn $ "-> " ++ (show start)
-    lift $ mapM_ (uncurry printNode) . M.toList . nodes $ g1
+    -- lift $ putStrLn $ "-> " ++ (show start)
+    lift $ mapM_ (uncurry printNode) . M.toList . nodes . depthFirstReorder start $ g1
+    lift $ blank >> blank
+    -- lift $ putStrLn $ "-> " ++ (show start)
+    lift $ mapM_ (uncurry printNode) . M.toList . nodes . depthFirstReorder start $ g2
     lift $ blank
-    lift $ putStrLn $ "-> " ++ (show start)
-    lift $ mapM_ (uncurry printNode) $ M.toList . nodes $ g2
     where
         blank = putStrLn "\n" 
         fromRight (Right x) = x 
