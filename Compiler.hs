@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 
 module Compiler where
 
@@ -80,6 +81,10 @@ data Expr
     | EMul Expr Expr
     | ESub Expr Expr
     | EEqual Expr Expr
+    | ELess Expr Expr
+    | EGreater Expr Expr
+    | ELessEqual Expr Expr
+    | EGreaterEqual Expr Expr
     | ENot Expr
     | EIfThenElse Expr Expr Expr
     | ELet VarId Expr Expr
@@ -92,7 +97,11 @@ instance Show Expr where
     show (EAdd a b)   = parens $ (show a) ++ " + "  ++ (show b)
     show (EMul a b)   = parens $ (show a) ++ " * "  ++ (show b)
     show (ESub a b)   = parens $ (show a) ++ " - "  ++ (show b)
-    show (EEqual a b) = parens $ (show a) ++ " == " ++ (show b)
+    show (EEqual a b)        = parens $ (show a) ++ " == " ++ (show b)
+    show (ELess a b)         = parens $ (show a) ++ " <" ++ (show b)
+    show (EGreater a b)      = parens $ (show a) ++ " > " ++ (show b)
+    show (ELessEqual a b)    = parens $ (show a) ++ " <= " ++ (show b)
+    show (EGreaterEqual a b) = parens $ (show a) ++ " >= " ++ (show b)
     show (ENot (EEqual a b)) = parens $ (show a) ++ " != " ++ (show b)
     show (ENot x) = parens $ "!" ++ (show x)
     show (EVar v) = showVarId v 
@@ -266,7 +275,11 @@ data BasicStmt
     | BAdd    VarId BasicExpr BasicExpr
     | BMul    VarId BasicExpr BasicExpr
     | BSub    VarId BasicExpr BasicExpr
-    | BEqual  VarId BasicExpr BasicExpr
+    | BEqual         VarId BasicExpr BasicExpr
+    | BLess          VarId BasicExpr BasicExpr
+    | BGreater       VarId BasicExpr BasicExpr
+    | BLessEqual     VarId BasicExpr BasicExpr
+    | BGreaterEqual  VarId BasicExpr BasicExpr
     | BNot    VarId BasicExpr
     | BApp    VarId FunId [BasicExpr]
     deriving (Eq)
@@ -276,7 +289,11 @@ instance Show BasicStmt where
     show (BAdd   v a b) = (showVarId v) ++=++ (show a) ++ " + "  ++ (show b)
     show (BMul   v a b) = (showVarId v) ++=++ (show a) ++ " * "  ++ (show b)
     show (BSub   v a b) = (showVarId v) ++=++ (show a) ++ " - "  ++ (show b)
-    show (BEqual v a b) = (showVarId v) ++=++ (show a) ++ " == " ++ (show b)
+    show (BEqual        v a b) = (showVarId v) ++=++ (show a) ++ " == " ++ (show b)
+    show (BLess         v a b) = (showVarId v) ++=++ (show a) ++ " < "  ++ (show b)
+    show (BGreater      v a b) = (showVarId v) ++=++ (show a) ++ " > "  ++ (show b)
+    show (BLessEqual    v a b) = (showVarId v) ++=++ (show a) ++ " <= " ++ (show b)
+    show (BGreaterEqual v a b) = (showVarId v) ++=++ (show a) ++ " >= " ++ (show b)
     show (BNot   v x)   = (showVarId v) ++=++ "!" ++ (show x)
     show (BApp    v f exprs) = (showVarId v) ++=++ (f ++ (parens . concat . intersperse ", " . map show $ exprs))
 
@@ -289,7 +306,11 @@ toBasicExpr (ENum n)     = pure (BNum n, [])
 toBasicExpr (EAdd a b)   = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BAdd   t v1 v2])
 toBasicExpr (EMul a b)   = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BMul   t v1 v2])
 toBasicExpr (ESub a b)   = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BSub   t v1 v2])
-toBasicExpr (EEqual a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BEqual t v1 v2])
+toBasicExpr (EEqual        a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BEqual        t v1 v2])
+toBasicExpr (ELess         a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BLess         t v1 v2])
+toBasicExpr (EGreater      a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BGreater      t v1 v2])
+toBasicExpr (ELessEqual    a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BLessEqual    t v1 v2])
+toBasicExpr (EGreaterEqual a b) = do (v1, s1) <- toBasicExpr a; (v2, s2) <- toBasicExpr b; t <- freshVarId; pure (BVar t, s1 ++ s2 ++ [BGreaterEqual t v1 v2])
 toBasicExpr (ENot x)     = do (v1, s1) <- toBasicExpr x; t <- freshVarId; pure (BVar t, s1 ++ [BNot t v1])
 toBasicExpr (EVar v) = pure (BVar v, [])
 toBasicExpr (EApp fun exprs) = do
@@ -481,7 +502,11 @@ findVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock
         basicStmtVars (BAdd   v a b) = v : (basicExprVars a) ++ (basicExprVars b)
         basicStmtVars (BMul   v a b) = v : (basicExprVars a) ++ (basicExprVars b)
         basicStmtVars (BSub   v a b) = v : (basicExprVars a) ++ (basicExprVars b)
-        basicStmtVars (BEqual v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BEqual        v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BLess         v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BGreater      v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BLessEqual    v a b) = v : (basicExprVars a) ++ (basicExprVars b)
+        basicStmtVars (BGreaterEqual v a b) = v : (basicExprVars a) ++ (basicExprVars b)
         basicStmtVars (BNot   v x)   = v : (basicExprVars x)
         basicStmtVars (BApp   v f exprs) = v : (concat . map basicExprVars $ exprs)
 
@@ -498,7 +523,8 @@ data OpIR label var
     | Push IntVal | Pop | Dup
     | Load var | Store var
     | Add | Mul | Sub | Incr | Decr
-    | Equal | Not
+    | Equal | Less | Greater | LessEqual | GreaterEqual
+    | Not
     | Jmp   label
     | JmpIf label
     | Call ProcId Int
@@ -519,7 +545,11 @@ mapLabel _ (Mul )      = Mul
 mapLabel _ (Sub )      = Sub 
 mapLabel _ (Incr )     = Incr 
 mapLabel _ (Decr)      = Decr
-mapLabel _ (Equal )    = Equal 
+mapLabel _ (Equal       ) = Equal 
+mapLabel _ (Less        ) = Less 
+mapLabel _ (Greater     ) = Greater 
+mapLabel _ (LessEqual   ) = LessEqual 
+mapLabel _ (GreaterEqual) = GreaterEqual 
 mapLabel _ (Not)       = Not
 mapLabel _ (Call id n) = Call id n
 mapLabel _ (Ret)       = Ret
@@ -537,7 +567,11 @@ mapVar _ (Mul )      = Mul
 mapVar _ (Sub )      = Sub 
 mapVar _ (Incr )     = Incr 
 mapVar _ (Decr)      = Decr
-mapVar _ (Equal )    = Equal 
+mapVar _ (Equal       ) = Equal 
+mapVar _ (Less        ) = Less 
+mapVar _ (Greater     ) = Greater 
+mapVar _ (LessEqual   ) = LessEqual 
+mapVar _ (GreaterEqual) = GreaterEqual 
 mapVar _ (Not)       = Not
 mapVar _ (Jmp   label) = Jmp   label 
 mapVar _ (JmpIf label) = JmpIf label
@@ -592,7 +626,11 @@ compileBasicStmt (BSetVar v x)  = [compileBasicExpr x, Store v]
 compileBasicStmt (BAdd   v a b) = [compileBasicExpr a, compileBasicExpr b, Add,   Store v]
 compileBasicStmt (BMul   v a b) = [compileBasicExpr a, compileBasicExpr b, Mul,   Store v]
 compileBasicStmt (BSub   v a b) = [compileBasicExpr a, compileBasicExpr b, Sub,   Store v]
-compileBasicStmt (BEqual v a b) = [compileBasicExpr a, compileBasicExpr b, Equal, Store v]
+compileBasicStmt (BEqual        v a b) = [compileBasicExpr a, compileBasicExpr b, Equal,        Store v]
+compileBasicStmt (BLess         v a b) = [compileBasicExpr a, compileBasicExpr b, Less,         Store v]
+compileBasicStmt (BGreater      v a b) = [compileBasicExpr a, compileBasicExpr b, Greater,      Store v]
+compileBasicStmt (BLessEqual    v a b) = [compileBasicExpr a, compileBasicExpr b, LessEqual,    Store v]
+compileBasicStmt (BGreaterEqual v a b) = [compileBasicExpr a, compileBasicExpr b, GreaterEqual, Store v]
 compileBasicStmt (BNot   v x)   = [compileBasicExpr x, Not, Store v]
 compileBasicStmt (BApp   v f exprs) = let ecode = compileBasicExpr <$> exprs in ecode ++ [Call f (length exprs), Store v]
 
@@ -645,7 +683,11 @@ toVMOp (Mul )      = VM.Mul
 toVMOp (Sub )      = VM.Sub 
 toVMOp (Incr )     = VM.Incr 
 toVMOp (Decr)      = VM.Decr
-toVMOp (Equal )    = VM.Equal 
+toVMOp (Equal       ) = VM.Equal
+toVMOp (Less        ) = VM.Less
+toVMOp (Greater     ) = VM.Greater
+toVMOp (LessEqual   ) = VM.LessEqual
+toVMOp (GreaterEqual) = VM.GreaterEqual
 toVMOp (Not)       = VM.Not
 toVMOp (Jmp   off) = VM.Jmp   off 
 toVMOp (JmpIf off) = VM.JmpIf off
@@ -677,6 +719,11 @@ simplifyExpr :: Expr -> Expr
 simplifyExpr (EAdd (ENum x) (ENum y)) = (ENum (x+y))
 simplifyExpr (EMul (ENum x) (ENum y)) = (ENum (x*y))
 simplifyExpr (ESub (ENum x) (ENum y)) = (ENum (x-y))
+simplifyExpr (EEqual        (ENum a) (ENum b)) = boolToExpr $ a == b
+simplifyExpr (ELess         (ENum a) (ENum b)) = boolToExpr $ a <  b
+simplifyExpr (EGreater      (ENum a) (ENum b)) = boolToExpr $ a >  b
+simplifyExpr (ELessEqual    (ENum a) (ENum b)) = boolToExpr $ a <= b
+simplifyExpr (EGreaterEqual (ENum a) (ENum b)) = boolToExpr $ a >= b
 -- neutral element
 simplifyExpr (EAdd x        (ENum 0)) = x
 simplifyExpr (EAdd (ENum 0) x       ) = x
@@ -692,13 +739,12 @@ simplifyExpr e@(EAdd (ESub x y) y')
 simplifyExpr e@(EAdd y' (ESub x y))
     | y == y' = x
     | otherwise = (EAdd (simplifyExpr y') (ESub (simplifyExpr x) (simplifyExpr y)))
--- reflexivity
-simplifyExpr e@(EEqual (ENum a) (ENum b))
-    | a == b    = eConstTrue
-    | otherwise = eConstFalse
-simplifyExpr e@(EEqual a b)
-    | a == b  =  eConstTrue
-    | otherwise  =  EEqual (simplifyExpr a) (simplifyExpr b)
+-- boring
+simplifyExpr (EEqual        a b) = EEqual (simplifyExpr a) (simplifyExpr b)
+simplifyExpr (ELess         a b) = ELess (simplifyExpr a) (simplifyExpr b)
+simplifyExpr (EGreater      a b) = EGreater (simplifyExpr a) (simplifyExpr b)
+simplifyExpr (ELessEqual    a b) = ELessEqual (simplifyExpr a) (simplifyExpr b)
+simplifyExpr (EGreaterEqual a b) = EGreaterEqual (simplifyExpr a) (simplifyExpr b)
 simplifyExpr (EAdd a b)   = (EAdd (simplifyExpr a) (simplifyExpr b))
 simplifyExpr (EMul a b)   = (EMul (simplifyExpr a) (simplifyExpr b))
 simplifyExpr (ESub a b)   = (ESub (simplifyExpr a) (simplifyExpr b))
@@ -706,10 +752,13 @@ simplifyExpr (ENot x)     = (ENot (simplifyExpr x))
 simplifyExpr (EApp f exprs) = (EApp f (map simplifyExpr exprs))
 simplifyExpr x = x
 
+boolToExpr :: Bool -> Expr
+boolToExpr b = if b then eConstTrue else eConstFalse
+
 
 
 optimizeOps :: [OpIR Label var] -> [OpIR Label var]
--- optimizeOps = id
+-- TODO: optimize comparisons
 optimizeOps (x      : Push 0 : Mul : rest) = optimizeOps $ Push 0   : rest
 optimizeOps (Push 0 : x      : Mul : rest) = optimizeOps $ Push 0   : rest
 optimizeOps (x      : Push 1 : Mul : rest) = optimizeOps $ x        : rest
