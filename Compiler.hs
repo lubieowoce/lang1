@@ -1,7 +1,9 @@
 {-# LANGUAGE DeriveFunctor #-}
 
 module Compiler where
-import VM
+
+import VM hiding (Proc (..), Op (..))
+import qualified VM
 -- import Graph
 
 import Data.Map (Map)
@@ -11,12 +13,14 @@ import Data.Set (Set)
 import qualified Data.Set as S
 
 import Data.List (nub, intersperse, elemIndex)
-import Data.Maybe (fromJust, isJust)
+import Data.Maybe (fromJust, isJust, listToMaybe)
 
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans.Except
 import Control.Monad (forM)
+
+import Data.Bifunctor (Bifunctor, bimap, first, second)
 
 import Debug.Trace (trace)
 
@@ -106,7 +110,7 @@ type FunId = String
 
 
 type VarIxs = Map VarId VarIx
-type Procs = Map FunId Proc
+type Procs = Map FunId VM.Proc
 
 newtype Label = Label {unLabel :: Int} deriving (Eq, Ord)
 underLabel f = Label . f . unLabel
@@ -169,13 +173,13 @@ withVars vs ca = do
 getProcs :: Compile Procs
 getProcs = snd' <$> lift get
 
-getProc :: FunId -> Compile (Maybe Proc)
+getProc :: FunId -> Compile (Maybe VM.Proc)
 getProc funId = M.lookup funId <$> getProcs
 
 modifyProcs :: (Procs -> Procs) -> Compile ()
 modifyProcs f =  lift $ modify (overSnd f)
 
-newProc :: FunId -> Proc -> Compile ()
+newProc :: FunId -> VM.Proc -> Compile ()
 newProc funId proc = modifyProcs (M.insert funId proc)
 
 
@@ -213,20 +217,6 @@ fst' (a, _, _) = a
 snd' (_, a, _) = a
 thrd (_, _, a) = a
 
-
-
-compileProgram :: [Definition] -> Compile Program
-compileProgram defs = do
-    forM_ defs $ \(def@(DDef funId _ _)) -> do
-        proc <- withVars M.empty $ compileDefinition def
-        newProc funId proc
-    mainProc <- getProc "main"
-    case mainProc of
-        Nothing -> compileError "No definition for 'main'"
-        Just proc -> do 
-            when ((nArgs proc) /= 0) $ compileError "main must take no arguments"
-            ps <- getProcs
-            pure $ Program {mainProc=proc, allProcs=ps}
 
 
 data FlowGraph l = FlowGraph {nodes :: Map l (FlowNode l)} deriving (Eq, Show)
@@ -358,9 +348,10 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 pure $ (computeCond, insertNode ifCond node graph)
             SForFromTo var low high body -> do
                 loopInit <- freshLabel
-                (initExpr, computeInit, graph) <- computeBlock low graph loopInit 
+                (highExpr, computeHigh, graph) <- computeBlock high graph loopInit
+                (lowExpr, computeLow, graph) <- computeBlock low graph computeHigh
                 loopIf   <- freshLabel
-                (condExpr, computeCond, graph) <- computeBlock (ENot (EEqual (EVar var) high)) graph loopIf
+                (condExpr, computeCond, graph) <- computeBlock (ENot (EEqual (EVar var) (EAdd (toExpr highExpr) (ENum 1)))) graph loopIf
                 loopIncr <- freshLabel
                 (incrExpr, computeIncr, graph) <- computeBlock (EAdd (EVar var) (ENum 1)) graph loopIncr
                 (next, graph) <- go ctxs graph stmts
@@ -368,8 +359,8 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 (bodyCont,  graph) <- go ctxs' graph body
                 let incrNode = Block [BSetVar var incrExpr] computeCond
                     ifNode   = IfThenElse {cond=condExpr, ifTrue=bodyCont, ifFalse=next}
-                    initNode = Block [BSetVar var initExpr] computeCond
-                pure $ (computeInit, insertNodes [(loopInit, initNode), (loopIf, ifNode), (loopIncr, incrNode)] graph)
+                    initNode = Block [BSetVar var lowExpr] computeCond
+                pure $ (computeLow, insertNodes [(loopInit, initNode), (loopIf, ifNode), (loopIncr, incrNode)] graph)
             SBreak -> do 
                 end <- findLoopEnd ctxs `orError` "break outside of loop"
                 pure $ (end, graph)
@@ -403,6 +394,10 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
             _                 -> findLoopCont ctxs
 
 
+toExpr :: BasicExpr -> Expr
+toExpr (BVar v) = EVar v
+toExpr (BNum n) = ENum n
+
 findPredecessors :: Label -> FlowGraph Label -> [Label]
 findPredecessors l g = map fst . filter ((continuesTo l) . snd) .  M.toList . nodes $ g
 
@@ -434,29 +429,38 @@ joinBlocks g = (`execState` g) $ do
 
 
 
-depthFirst :: Label -> FlowGraph Label -> [Label]
-depthFirst entry graph = (`evalState` S.empty) $ go entry where
-    go :: Label -> State (Set Label) [Label]
+someOrder :: Label -> FlowGraph Label -> [Label]
+someOrder entry graph = snd $ (`evalState` S.empty) $ go entry where
+    go :: Label -> State (Set Label) (Maybe Label, [Label])
     go label = do
         visited <- get
         if label `S.member` visited
-            then pure $ []
+            then pure $ (Just label, [])
             else do
                 modify (S.insert label)
                 case getNode label graph of
                     Block {body=body, next=next} -> do
-                        ordered <- go next
-                        pure $ label : ordered
+                        (stopped, ordered) <- go next
+                        pure $ (stopped, label : ordered)
                     IfThenElse {ifTrue=ifTrue, ifFalse=ifFalse} -> do
-                        ordered  <- go ifTrue
-                        ordered' <- go ifFalse
-                        pure $ label : (ordered ++ ordered')
+                        (stopped, ordered)  <- go ifTrue
+                        (joined,  ordered') <- go ifFalse
+                        let rest = case joined of
+                                        Nothing -> ordered ++ ordered'
+                                        Just j  -> truePart ++ ordered' ++ afterJoin
+                                            where (truePart, afterJoin) = break (==j) ordered
+                        pure $ (stopped, label : rest)
                     Return {expr=expr} -> do
-                        pure $ [label]
+                        pure $ (Nothing, [label])
 
 
-depthFirstNodes :: Label -> FlowGraph Label -> [(Label, FlowNode Label)]
-depthFirstNodes entry graph = map (\l -> (l, getNode l graph)) $ depthFirst entry graph
+joinPoint :: (Ord a) => [a] -> [a] -> Maybe a
+joinPoint xs ys = listToMaybe . filter (`S.member` xs') $ ys
+    where xs' = S.fromList xs
+
+
+orderedNodes :: Label -> FlowGraph Label -> [(Label, FlowNode Label)]
+orderedNodes entry graph = map (\l -> (l, getNode l graph)) $ someOrder entry graph
 
 
 
@@ -466,8 +470,8 @@ renameLabels order graph = overNodes (M.fromList . map rename . M.toList) $ grap
     newLabel l = Label . fromJust $ elemIndex l order
 
 
-depthFirstReorder :: Label -> FlowGraph Label -> FlowGraph Label
-depthFirstReorder entry graph = let order = depthFirst entry graph in renameLabels order graph
+reorder :: Label -> FlowGraph Label -> FlowGraph Label
+reorder entry graph = let order = someOrder entry graph in renameLabels order graph
 
 
 findVars :: FlowGraph Label -> [VarId]
@@ -488,107 +492,184 @@ findVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock
         isBlock _          = False
 
         
-     
+
+data OpIR label var
+    = Nop
+    | Push IntVal | Pop | Dup
+    | Load var | Store var
+    | Add | Mul | Sub | Incr | Decr
+    | Equal | Not
+    | Jmp   label
+    | JmpIf label
+    | Call ProcId Int
+    | Ret
+    deriving (Eq, Show)
+
+mapLabel :: (l1 -> l2) -> OpIR l1 var -> OpIR l2 var
+mapLabel f (Jmp   label) = (Jmp   (f label)) 
+mapLabel f (JmpIf label) = (JmpIf (f label))
+mapLabel _ (Nop)       = Nop
+mapLabel _ (Push val)  = Push val
+mapLabel _ (Pop)       = Pop
+mapLabel _ (Dup)       = Dup
+mapLabel _ (Load var)  = Load var
+mapLabel _ (Store var) = Store var
+mapLabel _ (Add )      = Add 
+mapLabel _ (Mul )      = Mul 
+mapLabel _ (Sub )      = Sub 
+mapLabel _ (Incr )     = Incr 
+mapLabel _ (Decr)      = Decr
+mapLabel _ (Equal )    = Equal 
+mapLabel _ (Not)       = Not
+mapLabel _ (Call id n) = Call id n
+mapLabel _ (Ret)       = Ret
+
+
+mapVar :: (v1 -> v2) -> OpIR label v1 -> OpIR label v2
+mapVar f (Load var)  = Load (f var)
+mapVar f (Store var) = Store (f var)
+mapVar _ (Nop)       = Nop
+mapVar _ (Push val)  = Push val
+mapVar _ (Pop)       = Pop
+mapVar _ (Dup)       = Dup
+mapVar _ (Add )      = Add 
+mapVar _ (Mul )      = Mul 
+mapVar _ (Sub )      = Sub 
+mapVar _ (Incr )     = Incr 
+mapVar _ (Decr)      = Decr
+mapVar _ (Equal )    = Equal 
+mapVar _ (Not)       = Not
+mapVar _ (Jmp   label) = Jmp   label 
+mapVar _ (JmpIf label) = JmpIf label
+mapVar _ (Call id n) = Call id n
+mapVar _ (Ret)       = Ret
+
+-- typ OpIR' = OpIR Label VarId
+-- typ OpIR'' = OpIR Int VarIx
+
+
+data ProcIR label var = ProcIR {
+        funId :: FunId,
+        params :: [var],
+        vars :: [var],
+        code :: [(Label, [OpIR Label VarId])]
+    }
+    deriving (Eq, Show)
         
+-- fix syntax highlighting after the definition of ProcIR ?
+blah :: Bool
+blah = False
 
-compileDefinition' :: Definition -> Compile Proc
-compileDefinition' def@(DDef funId args body) = do
-    (entry, graph) <- flowGraph def
-    forM_ (findVars graph) $ \var ->
+compileDefinition :: Definition -> Compile (ProcIR Label VarId)
+compileDefinition def@(DDef funId params body) = do
+    (entry, _graph) <- flowGraph def
+    let graph = joinBlocks _graph
+    let storeArgs = [(Label (-1), Store <$> params)]
+    let bodyCode = compileGraph graph (someOrder entry graph)
+    let vars = nub $ params ++ findVars graph
+    pure $ ProcIR funId params vars (storeArgs ++ bodyCode)
+
+
+compileDefinition' def = (overCode $ map (second optimizeOps) . removeRedundantJumps) <$> compileDefinition def
+    where overCode f p = p {code = f (code p)}
+
+compileGraph :: FlowGraph Label -> [Label] -> [(Label, [OpIR Label VarId])]
+compileGraph graph order = map (\l -> c l (getNode l graph)) order where
+    c :: Label -> FlowNode Label -> (Label, [OpIR Label VarId])
+    c label node = (label, code) where
+        code = case node of
+            Block {body=body, next=next} ->
+                (concat . map compileBasicStmt $ body) ++ [Jmp next]
+            IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse} ->
+                (compileBasicExpr cond) : [Not, JmpIf ifFalse, Jmp ifTrue]
+            Return {expr=expr} -> do
+                (compileBasicExpr expr) : [Ret]
+
+
+
+compileBasicStmt :: BasicStmt -> [OpIR Label VarId]
+compileBasicStmt (BSetVar v x)  = [compileBasicExpr x, Store v]
+compileBasicStmt (BAdd   v a b) = [compileBasicExpr a, compileBasicExpr b, Add,   Store v]
+compileBasicStmt (BMul   v a b) = [compileBasicExpr a, compileBasicExpr b, Mul,   Store v]
+compileBasicStmt (BSub   v a b) = [compileBasicExpr a, compileBasicExpr b, Sub,   Store v]
+compileBasicStmt (BEqual v a b) = [compileBasicExpr a, compileBasicExpr b, Equal, Store v]
+compileBasicStmt (BNot   v x)   = [compileBasicExpr x, Not, Store v]
+compileBasicStmt (BApp   v f exprs) = let ecode = compileBasicExpr <$> exprs in ecode ++ [Call f (length exprs), Store v]
+
+compileBasicExpr :: BasicExpr -> OpIR Label VarId
+compileBasicExpr (BVar v) = Load v
+compileBasicExpr (BNum n) = Push n
+
+
+
+labelsToOffsets :: [(Label, [OpIR Label var])] -> [OpIR Int var]
+labelsToOffsets blocks = concat . map (\(label, block) -> map (mapLabel (labelToOffset M.!)) block) $ blocks where
+    labelToOffset :: Map Label Int
+    labelToOffset = M.fromList $ zip labelsOnly (init . scanl (+) 0 . map length $ codeOnly)
+    labelsOnly = map fst blocks   
+    codeOnly   = map snd blocks   
+
+
+removeRedundantJumps :: (Eq var, Show var) => [(Label, [OpIR Label var])] -> [(Label, [OpIR Label var])]
+removeRedundantJumps = (trace' "\nafter removing jumps: ") . mapWithNext removeJumpToNext . (trace' "\nbefore removing jumps: ") where
+
+    removeJumpToNext b1@(l1, n1) (Just b2@(l2, n2)) = if (not . null  $ n1) && (last n1 == (Jmp l2)) then (l1, init n1) else b1
+    removeJumpToNext b1 _ = b1
+
+    mapWithNext :: (a -> Maybe a -> b) -> [a] -> [b]
+    mapWithNext f (x : rest@(y:xs)) = (f x $ Just y) : mapWithNext f rest
+    mapWithNext f [x] = [f x Nothing]
+    mapWithNext _ [] = []
+
+
+toVMProc :: ProcIR Label VarId -> Compile (VM.Proc)
+toVMProc (ProcIR funId params vars code) = do
+    let nParams = length params
+    forM_ vars $ \var ->
         freshVarIx >>= newVar var
-    storeArgs <- forM args (\arg -> (Store . fromJust) <$> getVarIx arg)
-    bodyCode  <- compileGraph entry graph
-    let nArgs = length args
+    vs <- getVars
+    let code' = toVMOp . mapVar (vs M.!) <$> labelsToOffsets code
     nVars <- length <$> getVars
-    pure $ Proc nArgs nVars (storeArgs ++ bodyCode)
+    pure $ VM.Proc nParams nVars code'
 
 
-compileGraph :: Label -> FlowGraph Label -> Compile [Op]
-compileGraph entry graph = do
-    case getNode entry graph of
-        Block {body=body, next=next} -> do
-            -- bodyCode <- concat <$> mapM compileBasicStmt body
-            -- pure $ bodyCode `snoc` Jmp next
-            undefined
-        IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse} -> do
-            -- condCode <- compileBasicExpr cond
-            undefined
-        Return {expr=expr} -> do
-            undefined
+toVMOp :: OpIR Int VarIx -> VM.Op
+toVMOp (Load ix)   = VM.Load ix
+toVMOp (Store ix)  = VM.Store ix
+toVMOp (Nop)       = VM.Nop
+toVMOp (Push val)  = VM.Push val
+toVMOp (Pop)       = VM.Pop
+toVMOp (Dup)       = VM.Dup
+toVMOp (Add )      = VM.Add 
+toVMOp (Mul )      = VM.Mul 
+toVMOp (Sub )      = VM.Sub 
+toVMOp (Incr )     = VM.Incr 
+toVMOp (Decr)      = VM.Decr
+toVMOp (Equal )    = VM.Equal 
+toVMOp (Not)       = VM.Not
+toVMOp (Jmp   off) = VM.Jmp   off 
+toVMOp (JmpIf off) = VM.JmpIf off
+toVMOp (Call id n) = VM.Call id n
+toVMOp (Ret)       = VM.Ret
+
+compileProgram :: [Definition] -> Compile VM.Program
+compileProgram defs = do
+    forM_ defs $ \(def@(DDef funId _ _)) -> do
+        proc <- withVars M.empty $ do 
+            procIR <- compileDefinition' def
+            toVMProc procIR 
+        newProc funId proc
+    mainProc <- getProc "main"
+    case mainProc of
+        Nothing -> compileError "No definition for 'main'"
+        Just proc -> do 
+            when ((VM.nArgs proc) /= 0) $ compileError "main must take no arguments"
+            ps <- getProcs
+            pure $ VM.Program {mainProc=proc, allProcs=ps}
 
 
--- compileBasicStmt :: BasicStmt -> Compile [Op]
--- compileBasicStmt (BSetVar v x)  = do ix <- getVarIx v; pure [compileBasicExpr x, Store ix]
--- compileBasicStmt (BAdd   v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Add,   Store ix]
--- compileBasicStmt (BMul   v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Mul,   Store ix]
--- compileBasicStmt (BSub   v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Sub,   Store ix]
--- compileBasicStmt (BEqual v a b) = do ix <- getVarIx v; pure [compileBasicExpr a, compileBasicExpr b, Equal, Store ix]
--- compileBasicStmt (BNot   v x)   = do ix <- getVarIx v; pure [compileBasicExpr x, Not, Store ix]
--- compileBasicStmt (BApp   v f exprs) = do ecode <- mapM_ compileBasicExpr exprs; ix <- getVarIx v; pure $ ecode ++ [Call f (length exprs), Store ix]
+trace' s x = trace (s ++ " " ++ (show x)) x 
 
--- compileBasicExpr :: BasicExpr -> Compile Op
--- compileBasicExpr (BVar v) = Load <$> (getVarIx v `orError` "undefined variable" ++ (showVarId v))
--- compileBasicExpr (BNum n) = pure $ Push n
-
-
-
-
-
-compileDefinition :: Definition -> Compile Proc
-compileDefinition (DDef funId args body) = do
-    forM_ args $ \arg ->
-        freshVarIx >>= newVar arg
-    storeArgs <- forM args (\arg -> (Store . fromJust) <$> getVarIx arg)
-    bodyCode  <- optimizeOps <$> compileBlock body
-    let nArgs = length args
-    nVars <- length <$> getVars
-    pure $ Proc nArgs nVars (storeArgs ++ bodyCode)
-
-
-
-compileBlock :: [Stmt] -> Compile [Op]
-compileBlock = ((trace' "block: ") . concat <$>) . mapM compileStmt
-
-
-compileStmt :: Stmt -> Compile [Op]
-compileStmt (SPass) = pure $ [Nop]
-compileStmt (SNewVar var eVal) = do
-    mix <- getVarIx var
-    case mix of 
-        Nothing -> do
-            valCode <- compileExpr eVal
-            ix <- freshVarIx
-            newVar var ix
-            pure $ valCode ++ [Store ix]  
-        Just ix -> compileError $ "Redeclared variable: " ++ (show var) 
-compileStmt (SSetVar var eVal) = do
-    mix <- getVarIx var
-    case mix of
-        Just ix -> do
-            valCode <- compileExpr eVal
-            pure $ valCode ++ [Store ix]  
-        Nothing -> compileError $ "Variable used before declaration: " ++ (show var) 
-compileStmt (SIfThenElse eCond trueBlock falseBlock) = do
-    condCode  <- compileExpr eCond
-    trueCode  <- compileBlock trueBlock
-    falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compileBlock falseBlock
-    let trueOffset = length falseCode + 1
-    pure $ condCode ++ [JmpRelIf trueOffset] ++ falseCode ++ trueCode
-compileStmt (SWhile eCond body) = do
-    condCode  <- compileExpr eCond
-    bodyCode  <- compileBlock body
-    let gotoStart = [JmpRel $ negate ((length bodyCode) + (length gotoEnd) + (length condCode))]
-        gotoEnd   = [Not, JmpRelIf $ (length bodyCode) + (length gotoStart) + 1]
-    pure $ condCode ++ gotoEnd ++ bodyCode ++ gotoStart
-compileStmt (SForFromTo var low high body) = compileBlock [
-        SSetVar var low,
-        SWhile (ENot (EEqual (EVar var) (EAdd high (ENum 1)))) $
-            body ++ [SSetVar var (EAdd (EVar var) (ENum 1))]
-    ]
-compileStmt (SReturn expr) = do
-    exprCode <- compileExpr expr
-    pure $ exprCode ++ [Ret]
-compileStmt stmt = compileError $ "Statement not implemented: " ++ (show stmt)
 
 
 simplifyExpr :: Expr -> Expr
@@ -626,56 +707,24 @@ simplifyExpr (EApp f exprs) = (EApp f (map simplifyExpr exprs))
 simplifyExpr x = x
 
 
-compileExpr = compileExpr' . simplifyExpr
-trace' s x = trace (s ++ " " ++ (show x)) x 
--- compileExpr = compileExpr' . (trace' "simplified: ") . simplifyExpr . (trace' "original:   " )
 
-compileExpr' :: Expr -> Compile [Op]
-compileExpr' (ENum n)   = pure [Push n]
-compileExpr' (EAdd a        (ENum 1)) = concat <$> sequence [compileExpr' a, pure [Incr]]
-compileExpr' (EAdd (ENum 1) a       ) = concat <$> sequence [compileExpr' a, pure [Incr]]
-compileExpr' (EAdd a b) = concat <$> sequence [compileExpr' a, compileExpr' b, pure [Add]]
-compileExpr' (EMul a b) = concat <$> sequence [compileExpr' a, compileExpr' b, pure [Mul]]
-compileExpr' (ESub a (ENum 1)) = concat <$> sequence [compileExpr' a, pure [Decr]]
-compileExpr' (ESub a b) = concat <$> sequence [compileExpr' a, compileExpr' b, pure [Sub]]
-compileExpr' (ENot x)   = concat <$> sequence [compileExpr' x, pure [Not]]
-compileExpr' (EEqual a b) = concat <$> sequence [compileExpr' a, compileExpr' b, pure [Equal]]
-compileExpr' (EIfThenElse cond etrue efalse) = do
-    condCode  <- compileExpr' cond
-    trueCode  <- compileExpr' etrue
-    falseCode <-  (++ [JmpRel $ (length trueCode) + 1]) <$> compileExpr' efalse
-    let trueOffset = length falseCode + 1
-    pure $ condCode ++ [JmpRelIf trueOffset] ++ falseCode ++ trueCode
-compileExpr' (EVar var) = do 
-    mix <- getVarIx var
-    case mix of
-        Just ix -> pure [Load ix]
-        Nothing -> compileError $ "Use of undefined variable: " ++ (show var) 
-compileExpr' (EApp f exprs) = do 
-    mproc <- getProc f
-    when (not . isJust $ mproc) $ do
-        compileError $ "Use of undefined function: " ++ (show f)
-    argsCode <- concat <$> sequence (compileExpr' <$> exprs)
-    pure $ argsCode ++ [Call f (length exprs)]
-
-
-optimizeOps :: [Op] -> [Op]
-optimizeOps = id
--- optimizeOps (x      : Push 0 : Mul : rest) = optimizeOps $ Push 0   : rest
--- optimizeOps (Push 0 : x      : Mul : rest) = optimizeOps $ Push 0   : rest
--- optimizeOps (x      : Push 1 : Mul : rest) = optimizeOps $ x        : rest
--- optimizeOps (Push 1 : x      : Mul : rest) = optimizeOps $ x        : rest
--- optimizeOps (x      : Push 0 : Add : rest) = optimizeOps $ x        : rest
--- optimizeOps (Push 0 : x      : Add : rest) = optimizeOps $ x        : rest
--- optimizeOps (x      : Push 1 : Add : rest) = optimizeOps $ x : Incr : rest
--- optimizeOps (Push 1 : x      : Add : rest) = optimizeOps $ x : Incr : rest
--- optimizeOps (x      : Push 0 : Sub : rest) = optimizeOps $ x        : rest
--- optimizeOps (x      : Push 1 : Sub : rest) = optimizeOps $ x : Decr : rest
--- optimizeOps (Incr : Decr : rest) = optimizeOps rest
--- optimizeOps (Decr : Incr : rest) = optimizeOps rest
--- optimizeOps (Not  : Not  : rest) = optimizeOps rest
--- optimizeOps (op : rest) = op : optimizeOps rest
--- optimizeOps [] = []
+optimizeOps :: [OpIR Label var] -> [OpIR Label var]
+-- optimizeOps = id
+optimizeOps (x      : Push 0 : Mul : rest) = optimizeOps $ Push 0   : rest
+optimizeOps (Push 0 : x      : Mul : rest) = optimizeOps $ Push 0   : rest
+optimizeOps (x      : Push 1 : Mul : rest) = optimizeOps $ x        : rest
+optimizeOps (Push 1 : x      : Mul : rest) = optimizeOps $ x        : rest
+optimizeOps (x      : Push 0 : Add : rest) = optimizeOps $ x        : rest
+optimizeOps (Push 0 : x      : Add : rest) = optimizeOps $ x        : rest
+optimizeOps (x      : Push 1 : Add : rest) = optimizeOps $ x : Incr : rest
+optimizeOps (Push 1 : x      : Add : rest) = optimizeOps $ x : Incr : rest
+optimizeOps (x      : Push 0 : Sub : rest) = optimizeOps $ x        : rest
+optimizeOps (x      : Push 1 : Sub : rest) = optimizeOps $ x : Decr : rest
+optimizeOps (Incr : Decr : rest) = optimizeOps rest
+optimizeOps (Decr : Incr : rest) = optimizeOps rest
+optimizeOps (Not  : Not  : rest) = optimizeOps rest
+optimizeOps (op : rest) = op : optimizeOps rest
+optimizeOps [] = []
 
 
 
@@ -726,6 +775,18 @@ p3 = DDef "ple" [] [
     ]
 
 
+p4 = DDef "pred" ["x"] [
+        SNewVar "res" (ENum 0),
+        SIfThenElse (EEqual (EVar "x") (ENum 0)) [
+            SSetVar "res" (EVar "x")
+        ] [
+            SSetVar "res" (ESub (EVar "x") (ENum 1))
+        ],
+        SReturn (EVar "res")
+    ]
+
+
+
 main = either (putStrLn . ("Error: "++)) pure  =<<  (runExceptT mainE)
 
 mainE :: ExceptT String IO ()
@@ -739,14 +800,36 @@ mainE = do
     (start, g1) <- ExceptT . pure $ evalCompile (flowGraph prog)
     let g2 = joinBlocks g1
     -- lift $ putStrLn $ "-> " ++ (show start)
-    lift $ mapM_ (uncurry printNode) . M.toList . nodes . depthFirstReorder start $ g1
-    lift $ blank >> blank
-    -- lift $ putStrLn $ "-> " ++ (show start)
-    lift $ mapM_ (uncurry printNode) . M.toList . nodes . depthFirstReorder start $ g2
+    lift $ putStrLn "raw graph:"
+    lift $ mapM_ (uncurry printNode) . M.toList . nodes $ g2
     lift $ blank
+    lift $ putStrLn "ordered graph:"
+    lift $ mapM_ (uncurry printNode) . orderedNodes start $ g2
+    lift $ blank
+    lift $ putStrLn "renamed labels:"
+    lift $ mapM_ (uncurry printNode) . M.toList . nodes . reorder start $ g2
+    lift $ blank >> blank
+    cprog <- ExceptT . pure $ evalCompile (compileDefinition prog)
+    lift $ putStrLn "compiled, IR1:"
+    lift $ printCode $ code cprog 
+    lift $ blank
+    cprog2 <- ExceptT . pure $ evalCompile (compileDefinition' prog)
+    lift $ putStrLn "compiled, IR1: (removed redundant jumps, optimized bytecode)"
+    lift $ printCode $ code cprog2
+    lift $ blank
+    lift $ putStrLn "compiled, IR2:"
+    lift $ printCode $ labelsToOffsets $ code cprog2 
+    lift $ blank
+    lift $ putStrLn "compiled, result:"
+    result <- ExceptT . pure $ evalCompile (toVMProc cprog2)
+    lift $ printCode $ VM.code result
     where
         blank = putStrLn "\n" 
         fromRight (Right x) = x 
+        printCode :: (Show a) => [a] -> IO ()
+        printCode = mapM_ putStrLn . map (uncurry showLine) . zip [0..]
+        showLine n c = show n ++ "\t" ++ show c
+
         printNode l (IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse}) = do
             putStrLn $ (show l) ++ ": " ++ " if " ++ (show cond) ++ ""
             putStrLn . indent $ "then -> " ++ (show ifTrue)
