@@ -75,7 +75,8 @@ data Op
     -- | Get StackIx | Set StackIx
     | Load VarIx | Store VarIx
     | Add | Mul | Sub | Incr | Decr
-    | Equal | Not
+    | Equal | Less | Greater | LessEqual | GreaterEqual
+    | Not
     | Jmp   InstructionIx  | JmpRel   InstructionOffset
     | JmpIf InstructionIx  | JmpRelIf InstructionOffset
     | Call ProcId Int | Ret
@@ -126,6 +127,10 @@ step vm@(VM {frames=frame@(VMFrame {instructionPointer=ip, instructions=ops, sta
             (Incr,          (x:stack')  ) -> Next $ frame' {stack = x+1 : stack'} : outerFrames
             (Decr,          (x:stack')  ) -> Next $ frame' {stack = x-1 : stack'} : outerFrames
             (Equal,         (a:b:stack')) -> Next $ frame' {stack = (boolToInt $ a==b) : stack'} : outerFrames
+            (Less,          (a:b:stack')) -> Next $ frame' {stack = (boolToInt $ b < a) : stack'} : outerFrames
+            (Greater,       (a:b:stack')) -> Next $ frame' {stack = (boolToInt $ b > a) : stack'} : outerFrames
+            (LessEqual,     (a:b:stack')) -> Next $ frame' {stack = (boolToInt $ b <= a) : stack'} : outerFrames
+            (GreaterEqual,  (a:b:stack')) -> Next $ frame' {stack = (boolToInt $ b >= a) : stack'} : outerFrames
             (Not,           (b:stack')  ) -> Next $ frame' {stack = (boolToInt . not . intToBool $ b) : stack'} : outerFrames
             (Jmp ip',       _           ) -> Next $ frame' {instructionPointer=ip'}    : outerFrames
             (JmpRel off,    _           ) -> Next $ frame' {instructionPointer=ip+off} : outerFrames
