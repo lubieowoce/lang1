@@ -134,6 +134,7 @@ instance Show Op2 where
 
 
 parens s = "(" ++ s ++ ")"
+braces s = "{" ++ s ++ "}"
 showVarId v = v
 
 eConstFalse = ENum 0
@@ -286,7 +287,7 @@ return'     = Return ()
 
 overNodes f (g @ FlowGraph {nodes=ns}) = g { nodes = f ns }
 emptyFlowGraph = FlowGraph {nodes=M.empty}
-
+overExtra f n = n {extra = f (extra n)}
 
 getNode :: (Ord l) => l -> FlowGraph x l -> FlowNode x l
 getNode l = (M.! l) . nodes
@@ -517,18 +518,85 @@ reorder entry graph = let order = someOrder entry graph in renameLabels order gr
 
 findVars :: FlowGraph x Label -> [VarId]
 findVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock . map snd . M.toList . nodes
-    where
-        basicStmtVars (BSetVar v x)  = v : basicExprVars x 
-        basicStmtVars (B1 v _ x)   = v : (basicExprVars x)
-        basicStmtVars (B2 v _ a b) = v : (basicExprVars a) ++ (basicExprVars b)
-        basicStmtVars (BApp   v f exprs) = v : (concat . map basicExprVars $ exprs)
 
-        basicExprVars (BVar v) = [v]
-        basicExprVars (BNum _) = []
 
-        isBlock (Block {}) = True
-        isBlock _          = False
 
+
+nodeVars (Block {body=body})      = concat . map basicStmtVars $ body
+nodeVars (IfThenElse {cond=cond}) = basicExprVars cond
+nodeVars (Return {expr=expr})     = basicExprVars expr
+
+basicStmtVars (BSetVar v x)    = v : basicExprVars x 
+basicStmtVars (B1 v _ x)       = v : (basicExprVars x)
+basicStmtVars (B2 v _ a b)     = v : (basicExprVars a) ++ (basicExprVars b)
+basicStmtVars (BApp v f exprs) = v : (concat . map basicExprVars $ exprs)
+
+basicExprVars (BVar v) = [v]
+basicExprVars (BNum _) = []
+
+
+isBlock (Block {}) = True
+isBlock _          = False
+
+isReturn (Return {}) = True
+isReturn _           = False
+
+isIfThenElse (IfThenElse {}) = True
+isIfThenElse _               = False
+
+
+data BlockVars = BlockVars {inVars, outVars :: Set VarId}
+    deriving (Eq)
+
+instance Semigroup BlockVars where
+    bv1 <> bv2 = BlockVars {inVars  = (inVars  bv1) `S.union` (inVars  bv2),
+                            outVars = (outVars bv1) `S.union` (outVars bv2)}
+instance Monoid BlockVars where
+    mempty = BlockVars {inVars = S.empty, outVars = S.empty}
+    mappend = (<>)
+instance Show BlockVars where
+    show b = parens $ "in: " ++ (showVarSet . inVars $ b) ++ ", out: " ++ (showVarSet . outVars $ b)
+                where showVarSet = braces . concat . intersperse ", " . map showVarId . S.toList
+
+
+liveness :: FlowGraph x Label -> FlowGraph BlockVars Label
+liveness graph = snd $ (`execState` (S.empty, graph')) $ mapM_ (go S.empty Nothing) endLabels where
+        endLabels = map fst . filter (isReturn . snd) . M.toList . nodes $ graph
+        graph'    = overNodes (overExtra (const mempty) <$>) $ graph
+        go :: Set VarId -> Maybe Label -> Label -> State (Set (Set VarId, Maybe Label, Label), FlowGraph BlockVars Label) () 
+        go successorInVars from label = do
+            (visitedEdges, g) <- get
+            if (successorInVars, from, label) `S.member` visitedEdges
+                then pure ()
+                else do
+                    let node = getNode label g
+                        (inv, outv) = (inVars . extra $ node, outVars . extra $ node)
+                        (read, written) = nodeVars' node
+                        outv' = outv `S.union` successorInVars
+                        inv'  = inv  `S.union` (read    `S.union` (successorInVars `S.difference` written))
+                        node' = node {extra = BlockVars {inVars  = inv', outVars = outv' } }
+                    modify $   bimap  (S.insert (successorInVars, from, label))  (insertNode label node')
+                    mapM_ (go inv' (Just label)) $ findPredecessors label graph
+
+        nodeVars' :: FlowNode x l -> (Set VarId, Set VarId)
+        nodeVars' (Block {body=body}) = go S.empty body where
+            go local (stmt:rest) = let (extRead, written) = basicStmtVars' stmt 
+                                       extRead' = extRead `S.difference` local
+                                    in  (extRead', S.singleton written)  `pairwiseUnion`  go (S.insert written local) rest
+            go local [] = (S.empty, local)
+            -- go _ [] = (S.empty, S.empty)
+            pairwiseUnion (a, b) (c, d) = (a `S.union` c, b `S.union` d)
+        nodeVars' (IfThenElse {cond=cond}) = (basicExprVars' cond, S.empty)
+        nodeVars' (Return {expr=expr})     = (basicExprVars' expr, S.empty)
+
+        basicStmtVars' (BSetVar v x)    = (basicExprVars' x,                                v)
+        basicStmtVars' (B1 v _ x)       = (basicExprVars' x,                                v)
+        basicStmtVars' (B2 v _ a b)     = ((basicExprVars' a) `S.union` (basicExprVars' b), v)
+        basicStmtVars' (BApp v f exprs) = (S.unions . map basicExprVars' $ exprs,           v)
+
+        basicExprVars' = S.fromList . basicExprVars
+
+        -- startLabels = map fst . filter (null . (`findPredecessors` graph) . fst) . M.toList . nodes $ graph
 
 
 data ProcIR label var = ProcIR {
@@ -899,8 +967,12 @@ mainE = do
     lift $ putStrLn "ordered graph:"
     lift $ mapM_ (uncurry printNode) . orderedNodes start $ g2
     lift $ blank
+    let g3 = reorder start $ g2
     lift $ putStrLn "renamed labels:"
-    lift $ mapM_ (uncurry printNode) . M.toList . nodes . reorder start $ g2
+    lift $ mapM_ (uncurry printNode) . M.toList . nodes $ g3
+    lift $ blank >> blank
+    lift $ putStrLn "liveness:"
+    lift $ mapM_ (uncurry printNode) . M.toList . nodes $ liveness g3
     lift $ blank >> blank
     cprog <- ExceptT . pure $ evalCompile (compileDefinition prog)
     lift $ putStrLn "compiled, IR1:"
@@ -924,16 +996,18 @@ mainE = do
         printCode = mapM_ putStrLn . map (uncurry showLine) . zip [0..]
         showLine n c = show n ++ "\t" ++ show c
 
-        printNode l (IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse}) = do
-            putStrLn $ (show l) ++ ": " ++ " if " ++ (show cond) ++ ""
-            putStrLn . indent $ "then -> " ++ (show ifTrue)
-            putStrLn . indent $ "else -> " ++ (show ifFalse)
-        printNode l (Return {expr=expr}) =
-            putStrLn $ (show l) ++ ": " ++"return " ++ (show expr)
-        printNode l (Block {body=body, next=next}) = do 
-            putStrLn $ (show l) ++ ":"
-            mapM_ (putStrLn . indent . show) body
-            putStrLn $ "  -> " ++ (show next) 
+        printNode l n = do
+            putStrLn $ (show l) ++ ": " ++ (show . extra $ n)
+            case n of 
+                IfThenElse {cond=cond, ifTrue=ifTrue, ifFalse=ifFalse} -> do
+                    putStrLn $ "if " ++ (show cond)
+                    putStrLn . indent $ "then -> " ++ (show ifTrue)
+                    putStrLn . indent $ "else -> " ++ (show ifFalse)
+                Return {expr=expr} -> do
+                    putStrLn $ "return " ++ (show expr)
+                Block {body=body, next=next} -> do 
+                    mapM_ (putStrLn . indent . show) body
+                    putStrLn $ "  -> " ++ (show next) 
 
 
 indent = ("  "++)
