@@ -1,6 +1,12 @@
 module Main where
 
-import Compiler (Expr (..), Stmt (..), Definition (..), compileProgram, evalCompile)
+import Compiler (
+    Expr (..), Op1 (..), Op2 (..),
+    Stmt (..),
+    eNot, eAdd, eMul, eSub, eEqual, eLess, eGreater, eLessEqual, eGreaterEqual,
+    Definition (..),
+    compileProgram, evalCompile
+    )
 import VM
 
 import Data.Map (Map)
@@ -64,36 +70,36 @@ iterVM vm = (Right vm) : case step vm of
                             Request f -> [Left $ "Request: " ++ (show f)]
 
 
-e1 = (EAdd
+e1 = (eAdd
         (ENum 3)
-        (EMul
+        (eMul
             (ENum 2)
             (ENum 2)))
 
 
--- e2 = (EAdd
+-- e2 = (eAdd
 --         (ENum 3)
---         (EIfThenElse (EEqual (ENum 1) (ENum 2))
---             (EMul (ENum 2) (ENum 2))
---             (EMul (ENum 3) (ENum 3))))
+--         (EIfThenElse (eEqual (ENum 1) (ENum 2))
+--             (eMul (ENum 2) (ENum 2))
+--             (eMul (ENum 3) (ENum 3))))
 
--- e3 = (EAdd
+-- e3 = (eAdd
 --         (ENum 1)
---         (ELet "x" (EMul (ENum 2) (ENum 2))
---             (ELet "y" (EMul (ENum 3) (ENum 3))
---                 (EAdd (EVar "x") (EVar "y")) )))
+--         (ELet "x" (eMul (ENum 2) (ENum 2))
+--             (ELet "y" (eMul (ENum 3) (ENum 3))
+--                 (eAdd (EVar "x") (EVar "y")) )))
 
 
 p2 = [
 
         DDef "add1" ["a"] [
-            SReturn (EAdd (EVar "a") (ENum 1))
+            SReturn (eAdd (EVar "a") (ENum 1))
         ],
 
         DDef "main" [] [
             SNewVar "x" (ENum 5),
             SNewVar "y" (ENum 10),
-            SWhile (ENot (EEqual (EVar "x") (EVar "y"))) [
+            SWhile (eNot (eEqual (EVar "x") (EVar "y"))) [
                 SSetVar "x" (EApp "add1" [(EVar "x")])
             ],
             SReturn (EVar "x")
@@ -120,11 +126,11 @@ p3 = [
         -- DDef "fib" ["i"] [
         --     SNewVar "j" (ENum 0),
         --     SNewVar "a" (ENum 1), SNewVar "b" (ENum 1), SNewVar "c" (ENum 0),
-        --     SWhile (ENot (EEqual (EVar "j") (EVar "i"))) [
-        --         SSetVar "c" (EAdd (EVar "a") (EVar "b")),
+        --     SWhile (eNot (eEqual (EVar "j") (EVar "i"))) [
+        --         SSetVar "c" (eAdd (EVar "a") (EVar "b")),
         --         SSetVar "a" (EVar "b"),
         --         SSetVar "b" (EVar "c"),
-        --         SSetVar "j" (EAdd (EVar "j") (ENum 1))
+        --         SSetVar "j" (eAdd (EVar "j") (ENum 1))
         --     ],
         --     SReturn (EVar "a")
         -- ],
@@ -145,8 +151,8 @@ p3 = [
         DDef "fib" ["i"] [
             SNewVar "j" (ENum 0),
             SNewVar "a" (ENum 1), SNewVar "b" (ENum 1), SNewVar "c" (ENum 0),
-            SForFromTo "j" (ENum 0) (ESub (EVar "i") (ENum 1)) [
-                SSetVar "c" (EAdd (EVar "a") (EVar "b")),
+            SForFromTo "j" (ENum 0) (eSub (EVar "i") (ENum 1)) [
+                SSetVar "c" (eAdd (EVar "a") (EVar "b")),
                 SSetVar "a" (EVar "b"),
                 SSetVar "b" (EVar "c")
             ],
@@ -170,7 +176,7 @@ p4 = [
         DDef "main" [] [
             SNewVar "i" (ENum 0),
             SForFromTo "i" (ENum 1) (ENum 4) [
-                SIfThenElse (EEqual (EVar "i") (ENum 2)) [SContinue] [SPass]
+                SIfThenElse (eEqual (EVar "i") (ENum 2)) [SContinue] [SPass]
             ],
             SReturn (EVar "i")
         ]
