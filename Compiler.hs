@@ -560,23 +560,21 @@ instance Show BlockVars where
 
 
 liveness :: FlowGraph x Label -> FlowGraph BlockVars Label
-liveness graph = snd $ (`execState` (S.empty, graph')) $ mapM_ (go S.empty Nothing) endLabels where
+liveness graph = (`execState` graph') $ mapM_ (go S.empty) endLabels where
         endLabels = map fst . filter (isReturn . snd) . M.toList . nodes $ graph
         graph'    = overNodes (overExtra (const mempty) <$>) $ graph
-        go :: Set VarId -> Maybe Label -> Label -> State (Set (Set VarId, Maybe Label, Label), FlowGraph BlockVars Label) () 
-        go successorInVars from label = do
-            (visitedEdges, g) <- get
-            if (successorInVars, from, label) `S.member` visitedEdges
-                then pure ()
-                else do
-                    let node = getNode label g
-                        (inv, outv) = (inVars . extra $ node, outVars . extra $ node)
-                        (read, written) = nodeVars' node
-                        outv' = outv `S.union` successorInVars
-                        inv'  = inv  `S.union` (read    `S.union` (successorInVars `S.difference` written))
-                        node' = node {extra = BlockVars {inVars  = inv', outVars = outv' } }
-                    modify $   bimap  (S.insert (successorInVars, from, label))  (insertNode label node')
-                    mapM_ (go inv' (Just label)) $ findPredecessors label graph
+        go :: Set VarId -> Label -> State (FlowGraph BlockVars Label) () 
+        go successorInVars label = do
+            node <- getNode label <$> get
+            let vars @ BlockVars {inVars=inv, outVars=outv} = extra node
+                (read, written) = nodeVars' node
+                outv' = outv `S.union` successorInVars
+                inv'  = inv  `S.union` (read    `S.union` (successorInVars `S.difference` written))
+                vars' = BlockVars {inVars = inv', outVars=outv'}
+                node' = node {extra = BlockVars {inVars  = inv', outVars = outv' } }
+            when (vars /= vars') $ do
+                modify $ insertNode label node'
+                mapM_ (go inv') $ findPredecessors label graph
 
         nodeVars' :: FlowNode x l -> (Set VarId, Set VarId)
         nodeVars' (Block {body=body}) = go S.empty body where
