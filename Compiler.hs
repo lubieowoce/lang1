@@ -169,13 +169,13 @@ _        `orError` msg = throwE msg
 
 
 getVars :: Compile VarIxs
-getVars = fst' <$> lift get
+getVars = fst3 <$> lift get
 
 putVars :: VarIxs -> Compile ()
 putVars vs = modifyVars (const vs)
 
 modifyVars :: (VarIxs -> VarIxs) -> Compile ()
-modifyVars f =  lift $ modify (overFst f)
+modifyVars f =  lift $ modify (overFst3 f)
 
 newVar :: VarId -> VarIx -> Compile ()
 newVar var ix = modifyVars (M.insert var ix)
@@ -197,23 +197,23 @@ withVars vs ca = do
 
 
 getProcs :: Compile Procs
-getProcs = snd' <$> lift get
+getProcs = snd3 <$> lift get
 
 getProc :: FunId -> Compile (Maybe VM.Proc)
 getProc funId = M.lookup funId <$> getProcs
 
 modifyProcs :: (Procs -> Procs) -> Compile ()
-modifyProcs f =  lift $ modify (overSnd f)
+modifyProcs f =  lift $ modify (overSnd3 f)
 
 newProc :: FunId -> VM.Proc -> Compile ()
 newProc funId proc = modifyProcs (M.insert funId proc)
 
 
 getFresh :: Compile Int
-getFresh = thrd <$> lift get
+getFresh = thrd3 <$> lift get
 
 modifyFresh :: (Int -> Int) -> Compile ()
-modifyFresh f = modify (overThrd f) 
+modifyFresh f = modify (overThrd3 f) 
 
 fresh :: Compile Int
 fresh = do {x <- getFresh; modifyFresh (+1); pure x}
@@ -231,17 +231,17 @@ freshVarId = toVarId <$> fresh
 
 
 
-overFst :: (a -> b) -> (a, x, y) -> (b, x, y)
-overFst f (a, x, y) = (f a, x, y)
-overSnd :: (a -> b) -> (x, a, y) -> (x, b, y)
-overSnd f (x, a, y) = (x, f a, y)
-overThrd :: (a -> b) -> (x, y, a) -> (x, y, b)
-overThrd f (x, y, a) = (x, y, f a)
+overFst3 :: (a -> b) -> (a, x, y) -> (b, x, y)
+overFst3 f (a, x, y) = (f a, x, y)
+overSnd3 :: (a -> b) -> (x, a, y) -> (x, b, y)
+overSnd3 f (x, a, y) = (x, f a, y)
+overThrd3 :: (a -> b) -> (x, y, a) -> (x, y, b)
+overThrd3 f (x, y, a) = (x, y, f a)
 
 
-fst' (a, _, _) = a
-snd' (_, a, _) = a
-thrd (_, _, a) = a
+fst3  (a, _, _) = a
+snd3  (_, a, _) = a
+thrd3 (_, _, a) = a
 
 
 newtype Label = Label {unLabel :: Int} deriving (Eq, Ord)
