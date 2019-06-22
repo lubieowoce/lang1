@@ -22,6 +22,7 @@ import Control.Monad.Trans.Except
 import Control.Monad (forM)
 
 import Data.Bifunctor (Bifunctor, bimap, first, second)
+import Data.Semigroup
 
 import Debug.Trace (trace)
 
@@ -256,12 +257,12 @@ instance Show Label where show (Label l) = "L" ++ (show l)
 
 
 
-data FlowGraph l = FlowGraph {nodes :: Map l (FlowNode l)} deriving (Eq, Show)
+data FlowGraph x l = FlowGraph {nodes :: Map l (FlowNode x l)} deriving (Eq, Show)
 
-data FlowNode l
-    = Block {body :: [BasicStmt], next :: l}
-    | IfThenElse {cond :: BasicExpr, ifTrue, ifFalse :: l}
-    | Return {expr :: BasicExpr}
+data FlowNode x l
+    = Block      {extra :: x, body :: [BasicStmt], next :: l}
+    | IfThenElse {extra :: x, cond :: BasicExpr, ifTrue, ifFalse :: l}
+    | Return     {extra :: x, expr :: BasicExpr}
     deriving (Eq, Show, Functor)
 
 data BasicStmt
@@ -277,22 +278,29 @@ data BasicExpr
     deriving (Eq)
 
 
-overNodes f (g @ FlowGraph {nodes=ns}) = g { nodes = f ns}
+type FlowGraph' l = FlowGraph () l
+type FlowNode'  l = FlowNode  () l
+block'      = Block ()
+ifThenElse' = IfThenElse ()
+return'     = Return ()
+
+overNodes f (g @ FlowGraph {nodes=ns}) = g { nodes = f ns }
 emptyFlowGraph = FlowGraph {nodes=M.empty}
 
-getNode :: (Ord l) => l -> FlowGraph l -> FlowNode l
+
+getNode :: (Ord l) => l -> FlowGraph x l -> FlowNode x l
 getNode l = (M.! l) . nodes
 
-insertNode :: (Ord l) => l -> FlowNode l -> FlowGraph l -> FlowGraph l
+insertNode :: (Ord l) => l -> FlowNode x l -> FlowGraph x l -> FlowGraph x l
 insertNode l n = overNodes (M.insert l n)
 
-insertNodes :: (Ord l) => [(l, FlowNode l)] -> FlowGraph l -> FlowGraph l
+insertNodes :: (Ord l) => [(l, FlowNode x l)] -> FlowGraph x l -> FlowGraph x l
 insertNodes ns = overNodes (M.union (M.fromList ns))
 
-deleteNode :: (Ord l) => l -> FlowGraph l -> FlowGraph l
+deleteNode :: (Ord l) => l -> FlowGraph x l -> FlowGraph x l
 deleteNode l = overNodes (M.delete l)
 
-graphLabels :: FlowGraph l -> [l]
+graphLabels :: FlowGraph x l -> [l]
 graphLabels = map fst . M.toList . nodes
 
 
@@ -316,9 +324,9 @@ data Ctx l
 
 
 
-flowGraph :: Definition -> Compile (Label, FlowGraph Label)
+flowGraph :: Definition -> Compile (Label, FlowGraph' Label)
 flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
-    go :: [Ctx Label] -> (FlowGraph Label) -> [Stmt] -> Compile (Label, FlowGraph Label)
+    go :: [Ctx Label] -> (FlowGraph' Label) -> [Stmt] -> Compile (Label, FlowGraph' Label)
     go []      _     [] = compileError "missing return statement"
     go (ctx:_) graph [] = do
         case ctx of
@@ -332,13 +340,13 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 l <- freshLabel
                 (expr', computeExpr, graph) <- computeBlock expr graph l
                 (next, graph) <- go ctxs graph stmts
-                let node = Block [BSetVar var expr'] next
+                let node = block' [BSetVar var expr'] next
                 pure $ (computeExpr, insertNode l node graph)
             SSetVar var expr -> do
                 l <- freshLabel
                 (expr', computeExpr, graph) <- computeBlock expr graph l
                 (next, graph) <- go ctxs graph stmts
-                let node = Block [BSetVar var expr'] next
+                let node = block' [BSetVar var expr'] next
                 pure $ (computeExpr, insertNode l node graph)
             SIfThenElse cond trueBody falseBody -> do
                 ifCond <- freshLabel
@@ -347,7 +355,7 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 let ctxs' = BlockCtx {end=next} : ctxs
                 (trueCont,  graph) <- go ctxs' graph trueBody
                 (falseCont, graph) <- go ctxs' graph falseBody
-                let ifCondNode      = IfThenElse {cond=condExpr, ifTrue=trueCont, ifFalse=falseCont}
+                let ifCondNode = IfThenElse {extra=(), cond=condExpr, ifTrue=trueCont, ifFalse=falseCont}
                 pure $ (computeCond, insertNode ifCond ifCondNode graph)
             SWhile cond body -> do
                 ifCond <- freshLabel
@@ -355,7 +363,7 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 (next, graph) <- go ctxs graph stmts
                 let ctxs' = LoopCtx {cont=computeCond, end=next} : ctxs
                 (bodyCont,  graph) <- go ctxs' graph body
-                let node = IfThenElse {cond=condExpr, ifTrue=bodyCont, ifFalse=next}
+                let node = IfThenElse {extra=(), cond=condExpr, ifTrue=bodyCont, ifFalse=next}
                 pure $ (computeCond, insertNode ifCond node graph)
             SForFromTo var low high body -> do
                 loopInit <- freshLabel
@@ -368,9 +376,9 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 (next, graph) <- go ctxs graph stmts
                 let ctxs' = LoopCtx {cont=computeIncr, end=next} : ctxs
                 (bodyCont,  graph) <- go ctxs' graph body
-                let incrNode = Block [BSetVar var incrExpr] computeCond
-                    ifNode   = IfThenElse {cond=condExpr, ifTrue=bodyCont, ifFalse=next}
-                    initNode = Block [BSetVar var lowExpr] computeCond
+                let incrNode = block' [BSetVar var incrExpr] computeCond
+                    ifNode   = IfThenElse {extra=(), cond=condExpr, ifTrue=bodyCont, ifFalse=next}
+                    initNode = block' [BSetVar var lowExpr] computeCond
                 pure $ (computeLow, insertNodes [(loopInit, initNode), (loopIf, ifNode), (loopIncr, incrNode)] graph)
             SBreak -> do 
                 end <- findLoopEnd ctxs `orError` "break outside of loop"
@@ -381,16 +389,16 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
             SReturn expr -> do
                 l <- freshLabel
                 (expr', computeExpr, graph) <- computeBlock expr graph l 
-                let node = Return expr'
+                let node = return' expr'
                 pure $ (computeExpr, insertNode l node graph)
 
 
-    computeBlock :: Expr -> FlowGraph Label -> Label -> Compile (BasicExpr, Label, FlowGraph Label)
+    computeBlock :: Expr -> FlowGraph' Label -> Label -> Compile (BasicExpr, Label, FlowGraph' Label)
     computeBlock expr graph next = do
         computeExpr <- freshLabel
         (expr', temps) <- toBasicExpr expr
         pure $ if not . null $ temps
-                   then (expr', computeExpr, insertNode computeExpr (Block temps next) graph )
+                   then (expr', computeExpr, insertNode computeExpr (block' temps next) graph )
                    else (expr', next, graph)
 
     findLoopEnd [] = Nothing
@@ -431,10 +439,10 @@ toExpr (BVar v) = EVar v
 toExpr (BNum n) = ENum n
 
 
-findPredecessors :: Label -> FlowGraph Label -> [Label]
+findPredecessors :: Label -> FlowGraph x Label -> [Label]
 findPredecessors l g = map fst . filter ((continuesTo l) . snd) .  M.toList . nodes $ g
 
-continuesTo :: Label -> FlowNode Label -> Bool
+continuesTo :: Label -> FlowNode x Label -> Bool
 continuesTo target n = case n of
     Block {next=next} -> next == target
     IfThenElse {ifTrue=ifTrue, ifFalse=ifFalse} -> ifTrue == target || ifFalse == target
@@ -442,18 +450,18 @@ continuesTo target n = case n of
 
 
 
-joinBlocks :: FlowGraph Label -> FlowGraph Label
+joinBlocks :: (Semigroup x) => FlowGraph x Label -> FlowGraph x Label
 joinBlocks g = (`execState` g) $ do
     forM_ (graphLabels g) $ \label -> do
         g <- get
         when (label `M.member` (nodes g)) $
             case getNode label g of
-                Block body next ->
+                Block x2 body2 next ->
                     case findPredecessors label g of
                         [pre] -> case getNode pre g of
-                            Block body' _ -> do
+                            Block x1 body1 _ -> do
                                 modify (deleteNode label)
-                                let node' = Block (body'++body) next
+                                let node' = Block (x1 <> x2) (body1++body2) next
                                 modify (insertNode pre node')
                             _ -> pure () 
                         _ -> pure () 
@@ -462,7 +470,7 @@ joinBlocks g = (`execState` g) $ do
 
 
 
-someOrder :: Label -> FlowGraph Label -> [Label]
+someOrder :: Label -> FlowGraph x Label -> [Label]
 someOrder entry graph = snd $ (`evalState` S.empty) $ go entry where
     go :: Label -> State (Set Label) (Maybe Label, [Label])
     go label = do
@@ -492,22 +500,22 @@ joinPoint xs ys = listToMaybe . filter (`S.member` xs') $ ys
     where xs' = S.fromList xs
 
 
-orderedNodes :: Label -> FlowGraph Label -> [(Label, FlowNode Label)]
+orderedNodes :: Label -> FlowGraph x Label -> [(Label, FlowNode x Label)]
 orderedNodes entry graph = map (\l -> (l, getNode l graph)) $ someOrder entry graph
 
 
 
-renameLabels :: [Label] -> FlowGraph Label -> FlowGraph Label
+renameLabels :: [Label] -> FlowGraph x Label -> FlowGraph x Label
 renameLabels order graph = overNodes (M.fromList . map rename . M.toList) $ graph where
     rename (label, node) = (newLabel label, fmap newLabel node)
     newLabel l = Label . fromJust $ elemIndex l order
 
 
-reorder :: Label -> FlowGraph Label -> FlowGraph Label
+reorder :: Label -> FlowGraph x Label -> FlowGraph x Label
 reorder entry graph = let order = someOrder entry graph in renameLabels order graph
 
 
-findVars :: FlowGraph Label -> [VarId]
+findVars :: FlowGraph x Label -> [VarId]
 findVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock . map snd . M.toList . nodes
     where
         basicStmtVars (BSetVar v x)  = v : basicExprVars x 
@@ -634,10 +642,10 @@ compileDefinition' def = (overCode $ map (second optimizeOps) . removeRedundantJ
 
 
 
-compileGraph :: FlowGraph Label -> [Label] -> [(Label, [OpIR Label VarId])]
-compileGraph graph order = map (\l -> c l (getNode l graph)) order where
-    c :: Label -> FlowNode Label -> (Label, [OpIR Label VarId])
-    c label node = (label, code) where
+compileGraph :: FlowGraph x Label -> [Label] -> [(Label, [OpIR Label VarId])]
+compileGraph graph order = map (\l -> comp l (getNode l graph)) order where
+    comp :: Label -> FlowNode x Label -> (Label, [OpIR Label VarId])
+    comp label node = (label, code) where
         code = case node of
             Block {body=body, next=next} ->
                 (concat . map compileBasicStmt $ body) ++ [Jmp next]
@@ -911,6 +919,7 @@ mainE = do
     where
         blank = putStrLn "\n" 
         fromRight (Right x) = x 
+        fromRight (Left y) = error $ "fromRight: " ++ (show y)  
         printCode :: (Show a) => [a] -> IO ()
         printCode = mapM_ putStrLn . map (uncurry showLine) . zip [0..]
         showLine n c = show n ++ "\t" ++ show c
