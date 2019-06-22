@@ -36,19 +36,7 @@ data Definition
     = DDef FunId [VarId] [Stmt]
     deriving (Eq)
 
-instance Show Definition where
-    show (DDef funId vars body) =
-        "func " ++ funId ++ (parens . joinWith ", " . map showVarId $ vars) ++ " " ++ (showBlock body)
 
-
-showBlock :: [Stmt] -> String
-showBlock b = "{\n" ++ (joinWith "" . map indent' . map show $ b) ++ "}\n"
-
-
-indent' = unlines . map indent . lines
-
-joinWith :: String -> [String] -> String
-joinWith sep = concat . intersperse sep
 data Stmt
     = SPass
     | SNewVar VarId Expr
@@ -60,6 +48,36 @@ data Stmt
     | SContinue
     | SReturn Expr
     deriving (Eq)
+
+
+data Expr
+    = ENum Int
+    | EVar VarId
+    | E1 Op1 Expr
+    | E2 Op2 Expr Expr
+    | EApp FunId [Expr]
+    -- | EIfThenElse Expr Expr Expr
+    -- | ELet VarId Expr Expr
+    deriving (Eq)
+
+
+type VarId = String
+type FunId = String
+
+
+instance Show Definition where
+    show (DDef funId vars body) =
+        "func " ++ funId ++ (parens . joinWith ", " . map showVarId $ vars) ++ " " ++ (showBlock body)
+
+showBlock :: [Stmt] -> String
+showBlock b = "{\n" ++ (joinWith "" . map indent' . map show $ b) ++ "}\n"
+
+indent' = unlines . map indent . lines
+
+
+joinWith :: String -> [String] -> String
+joinWith sep = concat . intersperse sep
+
 
 instance Show Stmt where
     show (SPass) = "pass"
@@ -74,6 +92,14 @@ instance Show Stmt where
     show (SBreak) = "break"
     show (SContinue) = "continue"
     show (SReturn expr) = "return " ++ (show expr)
+
+
+instance Show Expr where
+    show (ENum n) = show n
+    show (EVar v) = showVarId v
+    show (E1 op x) = parens ((show op) ++ (show x))
+    show (E2 op a b) = parens ((show a) +|+ (show op) +|+ (show b))
+    show (EApp fun exprs) = fun ++ (parens . concat . intersperse ", " . map show $ exprs)
 
 
 data Op1
@@ -92,7 +118,6 @@ data Op2
     | OpGreaterEqual
     deriving (Eq)
 
-
 instance Show Op1 where
     show OpNot = "!"
 
@@ -106,50 +131,26 @@ instance Show Op2 where
     show OpLessEqual    = "<="
     show OpGreaterEqual = ">="
 
-data Expr
-    = ENum Int
-    | EVar VarId
-    | E1 Op1 Expr
-    | E2 Op2 Expr Expr
-    | EApp FunId [Expr]
-    -- | EIfThenElse Expr Expr Expr
-    -- | ELet VarId Expr Expr
-    deriving (Eq)
-
-instance Show Expr where
-    show (ENum n) = show n
-    show (EVar v) = showVarId v
-    show (E1 op x) = parens ((show op) ++ (show x))
-    show (E2 op a b) = parens ((show a) +|+ (show op) +|+ (show b))
-    show (EApp fun exprs) = fun ++ (parens . concat . intersperse ", " . map show $ exprs)
 
 parens s = "(" ++ s ++ ")"
 showVarId v = v
 
-
 eConstFalse = ENum 0
 eConstTrue = ENum 1
 
-type VarId = String
-type FunId = String
 
+
+
+
+type Compile a = ExceptT String (State CompilerState) a
+
+type CompilerState = (VarIxs, Procs, Int)
 
 type VarIxs = Map VarId VarIx
 type Procs = Map FunId VM.Proc
 
-newtype Label = Label {unLabel :: Int} deriving (Eq, Ord)
-underLabel f = Label . f . unLabel
-asLabel f = unLabel . f . Label
-newLabel :: Label -> Label
-newLabel = underLabel (+1)
-instance Show Label where show (Label l) = "L" ++ (show l)
-
-type CompilerState = (VarIxs, Procs, Int)
-
 emptyCompilerState :: CompilerState
 emptyCompilerState = (M.empty, M.empty, 0)
-
-type Compile a = ExceptT String (State CompilerState) a
 
 runCompile :: Compile a -> State CompilerState (Either String a)
 runCompile = runExceptT
@@ -243,8 +244,39 @@ snd' (_, a, _) = a
 thrd (_, _, a) = a
 
 
+newtype Label = Label {unLabel :: Int} deriving (Eq, Ord)
+
+underLabel f = Label . f . unLabel
+asLabel f = unLabel . f . Label
+
+newLabel :: Label -> Label
+newLabel = underLabel (+1)
+
+instance Show Label where show (Label l) = "L" ++ (show l)
+
+
 
 data FlowGraph l = FlowGraph {nodes :: Map l (FlowNode l)} deriving (Eq, Show)
+
+data FlowNode l
+    = Block {body :: [BasicStmt], next :: l}
+    | IfThenElse {cond :: BasicExpr, ifTrue, ifFalse :: l}
+    | Return {expr :: BasicExpr}
+    deriving (Eq, Show, Functor)
+
+data BasicStmt
+    = BSetVar VarId BasicExpr 
+    | B1 VarId Op1 BasicExpr
+    | B2 VarId Op2 BasicExpr BasicExpr
+    | BApp VarId FunId [BasicExpr]
+    deriving (Eq)
+
+data BasicExpr
+    = BVar VarId
+    | BNum Int
+    deriving (Eq)
+
+
 overNodes f (g @ FlowGraph {nodes=ns}) = g { nodes = f ns}
 emptyFlowGraph = FlowGraph {nodes=M.empty}
 
@@ -264,34 +296,9 @@ graphLabels :: FlowGraph l -> [l]
 graphLabels = map fst . M.toList . nodes
 
 
-
-data Ctx l
-    = BlockCtx {end :: l}
-    | LoopCtx  {cont, end :: l}
-
-
-data FlowNode l
-    = Block {body :: [BasicStmt], next :: l}
-    | IfThenElse {cond :: BasicExpr, ifTrue, ifFalse :: l}
-    | Return {expr :: BasicExpr}
-    deriving (Eq, Show, Functor)
-
-data BasicExpr
-    = BVar VarId
-    | BNum Int
-    deriving (Eq)
-
-
 instance Show BasicExpr where
     show (BVar v) = showVarId v
     show (BNum n) = show n
-
-data BasicStmt
-    = BSetVar VarId BasicExpr 
-    | B1 VarId Op1 BasicExpr
-    | B2 VarId Op2 BasicExpr BasicExpr
-    | BApp VarId FunId [BasicExpr]
-    deriving (Eq)
 
 instance Show BasicStmt where
     show (BSetVar v x)       = (showVarId v) +=+ (show x)
@@ -299,34 +306,14 @@ instance Show BasicStmt where
     show (B2 v op a b)       = (showVarId v) +=+ ((show a) +|+ (show op) +|+ (show b))
     show (BApp    v f exprs) = (showVarId v) +=+ (f ++ (parens . concat . intersperse ", " . map show $ exprs))
 
-
 a +=+ b = a ++ " = " ++ b
 a +|+ b = a ++ " " ++ b
 
 
-toBasicExpr :: Expr -> Compile (BasicExpr, [BasicStmt])
-toBasicExpr (ENum n)     = pure (BNum n, [])
-toBasicExpr (EVar v) = pure (BVar v, [])
-toBasicExpr (E1 op x)   = do
-    (v1, s1) <- toBasicExpr x
-    t <- freshVarId
-    pure (BVar t, s1 ++ [B1 t op v1])
-toBasicExpr (E2 op a b) = do
-    (v1, s1) <- toBasicExpr a
-    (v2, s2) <- toBasicExpr b
-    t <- freshVarId
-    pure (BVar t, s1 ++ s2 ++ [B2 t op v1 v2])
-toBasicExpr (EApp fun exprs) = do
-    xs <- mapM toBasicExpr exprs
-    let vars  = map fst xs
-    let temps = concat $ map snd xs
-    t <- freshVarId
-    pure (BVar t, temps ++ [BApp t fun vars])
+data Ctx l
+    = BlockCtx {end :: l}
+    | LoopCtx  {cont, end :: l}
 
-
-
-snoc :: [a] -> a -> [a]
-snoc xs x = xs ++ [x]
 
 
 flowGraph :: Definition -> Compile (Label, FlowGraph Label)
@@ -397,6 +384,7 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
                 let node = Return expr'
                 pure $ (computeExpr, insertNode l node graph)
 
+
     computeBlock :: Expr -> FlowGraph Label -> Label -> Compile (BasicExpr, Label, FlowGraph Label)
     computeBlock expr graph next = do
         computeExpr <- freshLabel
@@ -410,7 +398,7 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
         case ctx of
             LoopCtx {end=e} -> Just e
             _                -> findLoopEnd ctxs
-            
+
     findLoopCont [] = Nothing
     findLoopCont (ctx:ctxs) =
         case ctx of
@@ -418,9 +406,30 @@ flowGraph (DDef funId _ body) = go [] emptyFlowGraph body where
             _                 -> findLoopCont ctxs
 
 
+toBasicExpr :: Expr -> Compile (BasicExpr, [BasicStmt])
+toBasicExpr (ENum n)     = pure (BNum n, [])
+toBasicExpr (EVar v) = pure (BVar v, [])
+toBasicExpr (E1 op x)   = do
+    (v1, s1) <- toBasicExpr x
+    t <- freshVarId
+    pure (BVar t, s1 ++ [B1 t op v1])
+toBasicExpr (E2 op a b) = do
+    (v1, s1) <- toBasicExpr a
+    (v2, s2) <- toBasicExpr b
+    t <- freshVarId
+    pure (BVar t, s1 ++ s2 ++ [B2 t op v1 v2])
+toBasicExpr (EApp fun exprs) = do
+    xs <- mapM toBasicExpr exprs
+    let vars  = map fst xs
+    let temps = concat $ map snd xs
+    t <- freshVarId
+    pure (BVar t, temps ++ [BApp t fun vars])
+
+
 toExpr :: BasicExpr -> Expr
 toExpr (BVar v) = EVar v
 toExpr (BNum n) = ENum n
+
 
 findPredecessors :: Label -> FlowGraph Label -> [Label]
 findPredecessors l g = map fst . filter ((continuesTo l) . snd) .  M.toList . nodes $ g
@@ -512,7 +521,20 @@ findVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock
         isBlock (Block {}) = True
         isBlock _          = False
 
+
+
+data ProcIR label var = ProcIR {
+        funId :: FunId,
+        params :: [var],
+        vars :: [var],
+        code :: [(Label, [OpIR Label VarId])]
+    }
+    deriving (Eq, Show)
         
+-- fix syntax highlighting after the definition of ProcIR ?
+blah :: Bool
+blah = False
+
 
 data OpIR label var
     = Nop
@@ -578,17 +600,24 @@ mapVar _ (Ret)       = Ret
 -- typ OpIR'' = OpIR Int VarIx
 
 
-data ProcIR label var = ProcIR {
-        funId :: FunId,
-        params :: [var],
-        vars :: [var],
-        code :: [(Label, [OpIR Label VarId])]
-    }
-    deriving (Eq, Show)
-        
--- fix syntax highlighting after the definition of ProcIR ?
-blah :: Bool
-blah = False
+
+
+compileProgram :: [Definition] -> Compile VM.Program
+compileProgram defs = do
+    forM_ defs $ \(def@(DDef funId _ _)) -> do
+        proc <- withVars M.empty $ do 
+            procIR <- compileDefinition' def
+            toVMProc procIR 
+        newProc funId proc
+    mainProc <- getProc "main"
+    case mainProc of
+        Nothing -> compileError "No definition for 'main'"
+        Just proc -> do 
+            when ((VM.nArgs proc) /= 0) $ compileError "main must take no arguments"
+            ps <- getProcs
+            pure $ VM.Program {mainProc=proc, allProcs=ps}
+
+
 
 compileDefinition :: Definition -> Compile (ProcIR Label VarId)
 compileDefinition def@(DDef funId params body) = do
@@ -602,6 +631,8 @@ compileDefinition def@(DDef funId params body) = do
 
 compileDefinition' def = (overCode $ map (second optimizeOps) . removeRedundantJumps) <$> compileDefinition def
     where overCode f p = p {code = f (code p)}
+
+
 
 compileGraph :: FlowGraph Label -> [Label] -> [(Label, [OpIR Label VarId])]
 compileGraph graph order = map (\l -> c l (getNode l graph)) order where
@@ -660,6 +691,8 @@ removeRedundantJumps = (trace' "\nafter removing jumps: ") . mapWithNext removeJ
     mapWithNext _ [] = []
 
 
+
+
 toVMProc :: ProcIR Label VarId -> Compile (VM.Proc)
 toVMProc (ProcIR funId params vars code) = do
     let nParams = length params
@@ -694,23 +727,8 @@ toVMOp (JmpIf off) = VM.JmpIf off
 toVMOp (Call id n) = VM.Call id n
 toVMOp (Ret)       = VM.Ret
 
-compileProgram :: [Definition] -> Compile VM.Program
-compileProgram defs = do
-    forM_ defs $ \(def@(DDef funId _ _)) -> do
-        proc <- withVars M.empty $ do 
-            procIR <- compileDefinition' def
-            toVMProc procIR 
-        newProc funId proc
-    mainProc <- getProc "main"
-    case mainProc of
-        Nothing -> compileError "No definition for 'main'"
-        Just proc -> do 
-            when ((VM.nArgs proc) /= 0) $ compileError "main must take no arguments"
-            ps <- getProcs
-            pure $ VM.Program {mainProc=proc, allProcs=ps}
 
 
-trace' s x = trace (s ++ " " ++ (show x)) x 
 
 
 
@@ -777,7 +795,13 @@ optimizeOps [] = []
 
 
 
+trace' s x = trace (s ++ " " ++ (show x)) x 
+
+snoc xs x = xs ++ [x]
+
 isUnique xs = (length xs) == (length $ nub xs)
+
+
 
 
 
