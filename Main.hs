@@ -7,7 +7,7 @@ import Compiler (
     Definition (..),
     compileProgram, evalCompile
     )
-import VM
+import StackVM
 
 import Data.Map (Map)
 import qualified Data.Map as M

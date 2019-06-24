@@ -3,8 +3,8 @@
 
 module Compiler where
 
-import VM hiding (Proc (..), Op (..), boolToInt, intToBool)
-import qualified VM
+import StackVM hiding (Proc (..), Op (..), boolToInt, intToBool)
+import qualified StackVM
 -- import Graph
 
 import Data.Map (Map)
@@ -149,7 +149,7 @@ type Compile a = ExceptT String (State CompilerState) a
 type CompilerState = (VarIxs, Procs, Int)
 
 type VarIxs = Map VarId VarIx
-type Procs = Map FunId VM.Proc
+type Procs = Map FunId StackVM.Proc
 
 emptyCompilerState :: CompilerState
 emptyCompilerState = (M.empty, M.empty, 0)
@@ -201,13 +201,13 @@ withVars vs ca = do
 getProcs :: Compile Procs
 getProcs = snd3 <$> lift get
 
-getProc :: FunId -> Compile (Maybe VM.Proc)
+getProc :: FunId -> Compile (Maybe StackVM.Proc)
 getProc funId = M.lookup funId <$> getProcs
 
 modifyProcs :: (Procs -> Procs) -> Compile ()
 modifyProcs f =  lift $ modify (overSnd3 f)
 
-newProc :: FunId -> VM.Proc -> Compile ()
+newProc :: FunId -> StackVM.Proc -> Compile ()
 newProc funId proc = modifyProcs (M.insert funId proc)
 
 
@@ -676,7 +676,7 @@ mapVar _ (Ret)       = Ret
 
 
 
-compileProgram :: [Definition] -> Compile VM.Program
+compileProgram :: [Definition] -> Compile StackVM.Program
 compileProgram defs = do
     forM_ defs $ \(def@(DDef funId _ _)) -> do
         proc <- withVars M.empty $ do 
@@ -687,9 +687,9 @@ compileProgram defs = do
     case mainProc of
         Nothing -> compileError "No definition for 'main'"
         Just proc -> do 
-            when ((VM.nArgs proc) /= 0) $ compileError "main must take no arguments"
+            when ((StackVM.nArgs proc) /= 0) $ compileError "main must take no arguments"
             ps <- getProcs
-            pure $ VM.Program {mainProc=proc, allProcs=ps}
+            pure $ StackVM.Program {mainProc=proc, allProcs=ps}
 
 
 
@@ -767,7 +767,7 @@ removeRedundantJumps = (trace' "\nafter removing jumps: ") . mapWithNext removeJ
 
 
 
-toVMProc :: ProcIR Label VarId -> Compile (VM.Proc)
+toVMProc :: ProcIR Label VarId -> Compile (StackVM.Proc)
 toVMProc (ProcIR funId params vars code) = do
     let nParams = length params
     forM_ vars $ \var ->
@@ -775,31 +775,31 @@ toVMProc (ProcIR funId params vars code) = do
     vs <- getVars
     let code' = toVMOp . mapVar (vs M.!) <$> labelsToOffsets code
     nVars <- length <$> getVars
-    pure $ VM.Proc nParams nVars code'
+    pure $ StackVM.Proc nParams nVars code'
 
 
-toVMOp :: OpIR Int VarIx -> VM.Op
-toVMOp (Load ix)   = VM.Load ix
-toVMOp (Store ix)  = VM.Store ix
-toVMOp (Nop)       = VM.Nop
-toVMOp (Push val)  = VM.Push val
-toVMOp (Pop)       = VM.Pop
-toVMOp (Dup)       = VM.Dup
-toVMOp (Add )      = VM.Add 
-toVMOp (Mul )      = VM.Mul 
-toVMOp (Sub )      = VM.Sub 
-toVMOp (Incr )     = VM.Incr 
-toVMOp (Decr)      = VM.Decr
-toVMOp (Equal       ) = VM.Equal
-toVMOp (Less        ) = VM.Less
-toVMOp (Greater     ) = VM.Greater
-toVMOp (LessEqual   ) = VM.LessEqual
-toVMOp (GreaterEqual) = VM.GreaterEqual
-toVMOp (Not)       = VM.Not
-toVMOp (Jmp   off) = VM.Jmp   off 
-toVMOp (JmpIf off) = VM.JmpIf off
-toVMOp (Call id n) = VM.Call id n
-toVMOp (Ret)       = VM.Ret
+toVMOp :: OpIR Int VarIx -> StackVM.Op
+toVMOp (Load ix)   = StackVM.Load ix
+toVMOp (Store ix)  = StackVM.Store ix
+toVMOp (Nop)       = StackVM.Nop
+toVMOp (Push val)  = StackVM.Push val
+toVMOp (Pop)       = StackVM.Pop
+toVMOp (Dup)       = StackVM.Dup
+toVMOp (Add )      = StackVM.Add 
+toVMOp (Mul )      = StackVM.Mul 
+toVMOp (Sub )      = StackVM.Sub 
+toVMOp (Incr )     = StackVM.Incr 
+toVMOp (Decr)      = StackVM.Decr
+toVMOp (Equal       ) = StackVM.Equal
+toVMOp (Less        ) = StackVM.Less
+toVMOp (Greater     ) = StackVM.Greater
+toVMOp (LessEqual   ) = StackVM.LessEqual
+toVMOp (GreaterEqual) = StackVM.GreaterEqual
+toVMOp (Not)       = StackVM.Not
+toVMOp (Jmp   off) = StackVM.Jmp   off 
+toVMOp (JmpIf off) = StackVM.JmpIf off
+toVMOp (Call id n) = StackVM.Call id n
+toVMOp (Ret)       = StackVM.Ret
 
 
 
@@ -985,7 +985,7 @@ mainE = do
     lift $ blank
     lift $ putStrLn "compiled, result:"
     result <- ExceptT . pure $ evalCompile (toVMProc cprog2)
-    lift $ printCode $ VM.code result
+    lift $ printCode $ StackVM.code result
     where
         blank = putStrLn "\n" 
         fromRight (Right x) = x 
