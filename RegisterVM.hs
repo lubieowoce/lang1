@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass, StandaloneDeriving #-}
 
 module RegisterVM where
 
@@ -10,6 +11,8 @@ import qualified Data.Map as M
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 
+import qualified Data.Word as W 
+
 import Data.Char (chr, ord)
 
 import Data.Coerce
@@ -19,6 +22,12 @@ import Control.Monad (forM, forM_)
 import Data.Maybe (catMaybes)
 import Data.List (intersperse)
 
+import Control.Exception (SomeException, try, evaluate)
+-- import System.IO.Unsafe (unsafePerformIO, unsafeInterleaveIO)
+import System.IO.Unsafe
+import GHC.Generics (Generic)
+import Control.DeepSeq (force, NFData)
+
 import Data.Bifunctor (first, second)
 import Data.List (mapAccumL)
 
@@ -26,12 +35,11 @@ import Data.List (mapAccumL)
 newtype InstructionIx     = InstructionIx Int     deriving (Eq, Show)
 newtype InstructionOffset = InstructionOffset Int deriving (Eq, Show)
 
-
-
 data Register
     = SpecialRegister SpecialRegisterId
     | GeneralRegister GeneralRegisterId
     deriving (Eq)
+
 
 instance Show Register where
     show (SpecialRegister r) = case r of 
@@ -68,11 +76,11 @@ data Ref = Val | Ref Int deriving (Eq, Show)
 --     | HeapAddress  Int
 --     deriving (Eq, Show)
 
-
 data OpVal
     = OpValReg   Ref Register
     | OpValConst Ref IntVal
     deriving (Eq)
+
 
 instance Show OpVal where
     show (OpValReg Val r) = show r
@@ -97,14 +105,27 @@ instance Show OpLoc where
     show (OpLocReg (Ref off) r)   = showRef r off
     show (OpLocAddr n) = showRef n 0
 
+data Size
+    = S8
+    | S16
+    | S32
+    | S64
+    deriving (Eq, Ord, Enum, Show)
+
+sizeToBytes :: Size -> Int
+sizeToBytes S8  = 1
+sizeToBytes S16 = 2
+sizeToBytes S32 = 4
+sizeToBytes S64 = 8
+
 
 data Op
     = Nop
-    | Mov OpLoc OpVal
+    | Mov Size OpLoc OpVal
     | Lea OpLoc OpVal
 
-    | Push OpVal
-    | Pop OpLoc
+    | Push Size OpVal
+    | Pop  Size OpLoc
 
     | Add OpLoc OpVal OpVal
     | Sub OpLoc OpVal OpVal
@@ -114,13 +135,13 @@ data Op
 
     | Incr OpLoc
     | Decr OpLoc
-    
+
     | Equal        OpLoc OpVal OpVal 
     | Less         OpLoc OpVal OpVal 
     | Greater      OpLoc OpVal OpVal 
     | LessEqual    OpLoc OpVal OpVal 
     | GreaterEqual OpLoc OpVal OpVal
-
+    
     | Not OpLoc OpVal
 
     | Jmp         InstructionIx
@@ -133,7 +154,6 @@ data Op
     | SyscallPrint
 
     deriving (Eq, Show)
-
 
 
 data VM = VM {
@@ -353,18 +373,50 @@ _reg  i   = OpLocReg (Ref 0)   (GeneralRegister . GeneralRegisterId $ i)
 _regv i   = OpValReg (Ref 0)   (GeneralRegister . GeneralRegisterId $ i)
 int n    = OpValConst Val n
 
-
-
-type Procedure = (String -> InstructionIx) -> [(String, [Op])]
+type Block = (String, [Op])
+type Procedure = (String -> InstructionIx) -> [Block]
 type Program = [Procedure]
 
-resolveLabels :: Program -> [Op]
+resolveLabels :: Program -> Either String [Op]
 resolveLabels procs =
     let dummyProg = concat . map ($ dummy) $ procs
         labelOffsets = M.fromList . snd  .  mapAccumL (\off (lbl, len) -> (off+len, (lbl, off))) 0  .  map (second length) $ dummyProg
-    in concat . map snd . concat . map ($ (InstructionIx . (labelOffsets M.!))) $ procs
+    in concat . map snd . concat <$> mapM (tryResolve labelOffsets) procs
     where
         dummy = const (InstructionIx (-1))
+        tryResolve :: Map String Int -> Procedure -> Either String [Block]
+        tryResolve labelOffsets proc = maybe (Left "undefined label") Right $ try_ $ proc $ (InstructionIx . (labelOffsets M.!))
+
+try_ :: (NFData a) => a -> Maybe a
+try_ x = unsafeDupablePerformIO $ do
+            x' <- try $ evaluate (force x)
+            pure . eToMaybe . (first dropException) $ x'
+
+    where
+        dropException :: SomeException -> ()
+        dropException = const ()
+
+        eToMaybe = either (const Nothing) Just
+{-# NOINLINE try_ #-}
+
+deriving instance Generic InstructionIx
+deriving instance NFData  InstructionIx
+deriving instance Generic InstructionOffset
+deriving instance NFData  InstructionOffset
+deriving instance Generic Register
+deriving instance NFData  Register
+deriving instance Generic SpecialRegisterId
+deriving instance NFData  SpecialRegisterId
+deriving instance Generic GeneralRegisterId
+deriving instance NFData  GeneralRegisterId
+deriving instance Generic Ref
+deriving instance NFData  Ref
+deriving instance Generic OpVal
+deriving instance NFData  OpVal
+deriving instance Generic OpLoc
+deriving instance NFData  OpLoc
+deriving instance Generic Op
+deriving instance NFData  Op
 
 
 p0 :: Program
@@ -384,33 +436,34 @@ bootstrap lbl = [
 
 
 pmain lbl = [
+    -- main() -> int
     ("main", [
         Nop,
-        Push (int (-10000)),
+        Push (int (-10000)), 
+        Push (int 0), -- out_str: [int, 5]
         Push (int 0),
         Push (int 0),
         Push (int 0),
         Push (int 0),
-        Push (int 0),
-        Push (int (-10000)),
-        Push (int 8000),
+        Push (int (-10000)), 
+        Push (int 1200), -- arr: [int, 4]
         Push (int 40),
         Push (int 20),
         Push (int 10),
         Push (int (-10000)),
-        Lea (reg rtemp) (_ebpv $ 2+7),
+        Lea (reg rtemp) (_ebpv $ 2+7), -- arr
         Push ebpv,
         Mov ebp espv,
-        Push (int 4),     -- len
-        Push (regv rtemp), -- ptr
+        Push (int 4),      -- len(arr)
+        Push (regv rtemp), -- arr
         Call (lbl "arrsum"),
         Mov esp ebpv,
         Pop ebp,
-        Lea (reg rtemp) (_ebpv $ 2+1),
+        Lea (reg rtemp) (_ebpv $ 2+1), -- out_str
         Push (regv rtemp),
         Push ebpv,
         Mov ebp espv,
-        Push (regv rtemp),  -- str
+        Push (regv rtemp),  -- out_str
         Push (regv 0),      -- num
         Call (lbl "tostr"),
         Mov esp ebpv,
@@ -427,10 +480,10 @@ pmain lbl = [
         rtemp = 1
 
 parrrev lbl = [
+    -- arrrev(ptr: *int, len: int) -> int
     ("arrrev", [
         Mov (reg rdst) (_ebpv 2),
-        Mov (reg rlen) (_ebpv 1),
-        Add (reg rdstback) (regv rdst) (regv rlen),
+        Add (reg rdstback) (regv rdst) (_ebpv 1),
         Decr (reg rdstback) ]),
     ("arrev_loop", [
         Less (reg rtemp) (regv rdst) (regv rdstback),
@@ -447,11 +500,11 @@ parrrev lbl = [
     ]
     where
         rdst     = 0
-        rlen     = 1
-        rdstback = 2
-        rtemp    = 3
+        rdstback = 1
+        rtemp    = 2
 
 ptostr lbl = [
+    -- tostr(n: int, out: *int) -> int
     ("tostr", [
         Mov (reg rnum) (_ebpv 2),
         Mov (reg rdst) (_ebpv 1),
@@ -472,8 +525,8 @@ ptostr lbl = [
         Incr (reg rlen),
         Jmp (lbl "tostr_loop") ]),
     ("tostr_end", [
-        Sub (reg rdst) (regv rdst) (regv rlen),
         Push (regv rlen),
+        Mov (reg rdst) (_ebpv 1),
         Push ebpv,
         Mov ebp espv,
         Push (regv rlen),
@@ -490,17 +543,17 @@ ptostr lbl = [
         rlen     = 1
         rdst     = 2
         rtemp    = 3
-        rdstback = 4
 
 parrsum lbl = [
+    -- arrsum(ptr: *int, len: int) -> int
     ("arrsum", [
         Mov (reg rptr) (_ebpv 2),
-        Mov (reg rlen) (_ebpv 1),
         Mov (reg rres) (int 0),
         Mov (reg ri)   (int 0) ]),
     ("arrsum_loop", [
-        Less (reg rtemp) (regv ri) (regv rlen),
+        Less (reg rtemp) (regv ri) (_ebpv 1),
         Not (reg rtemp) (regv rtemp),
+        -- JmpIf (regv rtemp) (lbl "undefined"),
         JmpIf (regv rtemp) (lbl "arrsum_end"),
         Add (reg rres) (regv rres) (_regv rptr),
         Incr (reg ri),
@@ -511,11 +564,10 @@ parrsum lbl = [
         Ret ])
     ]
      where
-        rlen  = 0
-        rptr  = 1
-        rres  = 2
-        ri    = 3
-        rtemp = 4
+        rptr  = 0
+        rres  = 1
+        ri    = 2
+        rtemp = 3
 
 
 
@@ -523,10 +575,10 @@ parrsum lbl = [
 main = do
     -- let DDef funId args body = defAdd1 in
     --     print $ evalCompile $ compileDef funId args body
-    case (Right . resolveLabels $ p0) :: Either String [Op] of
+    case resolveLabels p0 of
 
         Left msg -> do
-            print msg
+            putStrLn $ "Compilation error: " ++ msg
 
         Right prog -> do
             printCode prog
