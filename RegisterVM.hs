@@ -17,6 +17,7 @@ import Data.Vector (Vector)
 import qualified Data.Vector as V
 
 import qualified Data.Word as W
+import qualified Data.Int  as I
 import Data.Bits
 
 import Data.Char (chr, ord)
@@ -76,7 +77,7 @@ type IntVal = Int
 
 
 data Ref = Val | Ref Int deriving (Eq, Show)
-
+data Signedness = Signed | Unsigned deriving (Eq, Show)
 -- data Address
 --     = StackAddress Int
 --     | HeapAddress  Int
@@ -267,10 +268,10 @@ data Op
     | Decr Size OpLoc
 
     | Equal        Size OpLoc OpVal OpVal 
-    | Less         Size OpLoc OpVal OpVal 
-    | Greater      Size OpLoc OpVal OpVal 
-    | LessEqual    Size OpLoc OpVal OpVal 
-    | GreaterEqual Size OpLoc OpVal OpVal
+    | Less         Size Signedness OpLoc OpVal OpVal 
+    | Greater      Size Signedness OpLoc OpVal OpVal 
+    | LessEqual    Size Signedness OpLoc OpVal OpVal 
+    | GreaterEqual Size Signedness OpLoc OpVal OpVal
     
     | Not Size OpLoc OpVal
 
@@ -310,20 +311,20 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
             Push size v           ->  push size v   vm'
             Pop  size dst         ->  pop  size dst vm'
 
-            Add size dst a b           ->  binop size (+) dst a b vm'
-            Sub size dst a b           ->  binop size (-) dst a b vm'
-            Mul size dst a b           ->  binop size (*) dst a b vm'
-            Div size dst a b           ->  binop size (div) dst a b vm'
-            Mod size dst a b           ->  binop size (mod) dst a b vm'
+            Add size dst a b           ->  binop size Unsigned (+) dst a b vm'
+            Sub size dst a b           ->  binop size Unsigned (-) dst a b vm'
+            Mul size dst a b           ->  binop size Unsigned (*) dst a b vm'
+            Div size dst a b           ->  binop size Unsigned (div) dst a b vm'
+            Mod size dst a b           ->  binop size Unsigned (mod) dst a b vm'
 
             Incr size loc              ->  incrop size (+ 1)        loc vm'
             Decr size loc              ->  incrop size (subtract 1) loc vm'
             
-            Equal        size dst a b  ->  binop' size (==) dst a b vm' 
-            Less         size dst a b  ->  binop' size (<)  dst a b vm'
-            Greater      size dst a b  ->  binop' size (>)  dst a b vm' 
-            LessEqual    size dst a b  ->  binop' size (<=) dst a b vm' 
-            GreaterEqual size dst a b  ->  binop' size (>=) dst a b vm'
+            Equal        size      dst a b  ->  binop' size Unsigned (==) dst a b vm' 
+            Less         size sign dst a b  ->  binop' size sign     (<)  dst a b vm'
+            Greater      size sign dst a b  ->  binop' size sign     (>)  dst a b vm' 
+            LessEqual    size sign dst a b  ->  binop' size sign     (<=) dst a b vm' 
+            GreaterEqual size sign dst a b  ->  binop' size sign     (>=) dst a b vm'
 
             Not size dst x             ->  unop' size (not) dst x vm'
 
@@ -344,15 +345,20 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
                                             then Error "bad print syscall"
                                             else Request (Print str (\_ -> pure vm3))
         where
-            binop' size (f :: forall a . Integral a => a -> a -> Bool) = binop size (\a b -> if f a b then a*0 + 1 else a*0)
-            binop size (f :: forall a . Integral a => a -> a -> a) dst a b vm = do
+            binop' size sign (f :: forall a . Integral a => a -> a -> Bool) =
+                binop size sign (\a b -> if f a b then 1 else 0)
+            binop size sign (f :: forall a . Integral a => a -> a -> a) dst a b vm = do
                 av <- getVal size a vm
                 bv <- getVal size b vm
-                let res = case promoteSize av bv of
-                            (W8  a, W8  b) -> W8  $ f a b
-                            (W16 a, W16 b) -> W16 $ f a b
-                            (W32 a, W32 b) -> W32 $ f a b
-                            (W64 a, W64 b) -> W64 $ f a b
+                let res = case (promoteSize av bv, sign) of
+                            ((W8  a, W8  b), Unsigned) -> W8  $ f a b
+                            ((W16 a, W16 b), Unsigned) -> W16 $ f a b
+                            ((W32 a, W32 b), Unsigned) -> W32 $ f a b
+                            ((W64 a, W64 b), Unsigned) -> W64 $ f a b
+                            ((W8  a, W8  b), Signed  ) -> W8  $ integral $ f (integral a :: I.Int8 ) (integral b :: I.Int8 )
+                            ((W16 a, W16 b), Signed  ) -> W16 $ integral $ f (integral a :: I.Int16) (integral b :: I.Int16)
+                            ((W32 a, W32 b), Signed  ) -> W32 $ integral $ f (integral a :: I.Int32) (integral b :: I.Int32)
+                            ((W64 a, W64 b), Signed  ) -> W64 $ integral $ f (integral a :: I.Int64) (integral b :: I.Int64)
                 setLoc size dst res $ vm
             incrop size (f :: forall a . Integral a => a -> a) loc vm = do 
                 v <- getVal size (toVal loc) vm
@@ -554,6 +560,7 @@ int n    = OpValConst Val n
 neg = negate
 sizeof = sizeNumBytes
 _Char = S8
+_UInt = S64
 _Int  = S64
 _Ptr  = S64
 
@@ -595,6 +602,8 @@ deriving instance Generic GeneralRegisterId
 deriving instance NFData  GeneralRegisterId
 deriving instance Generic Ref
 deriving instance NFData  Ref
+deriving instance Generic Signedness
+deriving instance NFData  Signedness
 deriving instance Generic OpVal
 deriving instance NFData  OpVal
 deriving instance Generic OpLoc
@@ -617,7 +626,7 @@ bootstrap lbl = [
     where
 
 
--- main() -> int
+-- main() -> uint
 pmain lbl = let
         offset_out_str = neg $ (1+5)   * (sizeof _Char) 
         offset_arr     = neg $ (1+5+2) * (sizeof _Char) + 4 * (sizeof _Int)
@@ -659,7 +668,7 @@ pmain lbl = let
         Lea (reg rtemp) (_ebpv $ offset_out_str),
         Push _Ptr (regv rtemp),
         SyscallPrint,
-        
+
         Mov _Ptr esp ebpv,
         Pop _Ptr ebp,
         Ret ])
@@ -668,7 +677,7 @@ pmain lbl = let
         rsum  = 0
         rtemp = 1
 
--- strrev(ptr: *char, len: int) -> int
+-- strrev(ptr: *char, len: uint) -> uint
 pstrrev lbl = let
     offset_ptr = (sizeof _Ptr) + (sizeof _Int)
     offset_len = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Ptr)
@@ -680,7 +689,7 @@ pstrrev lbl = let
         Add _Ptr (reg rdstback) (regv rdst) (_ebpv $ offset_len),
         Decr _Ptr (reg rdstback) ]),
     ("strrev_loop", [
-        Less _Ptr (reg rtemp) (regv rdst) (regv rdstback),
+        Less _Ptr Unsigned (reg rtemp) (regv rdst) (regv rdstback),
         Not _Int (reg rtemp) (regv rtemp),
         JmpIf (regv rtemp) (lbl "strrev_end"),
         Mov _Char (reg rtemp) (_regv rdstback),
@@ -699,7 +708,7 @@ pstrrev lbl = let
         rdstback = 1
         rtemp    = 2
 
--- tostr(n: int, out: *char) -> int
+-- tostr(n: uint, out: *char) -> uint
 ptostr lbl = let
     offset_num = (sizeof _Ptr) + (sizeof _Int)
     offset_out = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Int)
@@ -712,13 +721,13 @@ ptostr lbl = let
         Mov _Int (reg rnum) (_ebpv $ offset_num),
         Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Mov _Int (reg rlen) (int 0),
-        Greater _Int (reg rtemp) (regv rnum) (int 0),
+        Greater _Int Unsigned (reg rtemp) (regv rnum) (int 0),
         JmpIf (regv rtemp) (lbl "tostr_loop"),
         Mov _Char (_reg rdst) (int 48),
         Mov _Int (reg 0) (int 1),
         Ret ]),
     ("tostr_loop", [
-        LessEqual _Int (reg rtemp) (regv rnum) (int 0),
+        LessEqual _Int Unsigned (reg rtemp) (regv rnum) (int 0),
         JmpIf (regv rtemp) (lbl "tostr_end"),
         Mod _Int (reg rtemp) (regv rnum) (int 10),
         Add _Int (reg rtemp) (regv rtemp) (int 48),
@@ -729,11 +738,13 @@ ptostr lbl = let
         Jmp (lbl "tostr_loop") ]),
     ("tostr_end", [
         Push _Int (regv rlen),
+
         Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Push _Int (regv rlen),
         Push _Ptr (regv rdst),
         Call (lbl "strrev"),
         Add _Ptr esp espv (int $ (sizeof _Ptr) + (sizeof _Int)), -- arg cleanup
+
         Pop _Int (reg rlen),
         Mov _Int (reg 0) (regv rlen),
 
@@ -747,7 +758,7 @@ ptostr lbl = let
         rdst     = 2
         rtemp    = 3
 
--- arrsum(ptr: *int, len: int) -> int
+-- arrsum(ptr: *uint, len: int) -> uint
 parrsum lbl = let
     offset_ptr = (sizeof _Ptr) + (sizeof _Int) 
     offset_len = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Ptr)
@@ -761,7 +772,7 @@ parrsum lbl = let
         Mov _Int (reg rres) (int 0),
         Mov _Int (reg ri)   (int 0) ]),
     ("arrsum_loop", [
-        Less _Int (reg rtemp) (regv ri) (_ebpv $ offset_len),
+        Less _Int Unsigned (reg rtemp) (regv ri) (_ebpv $ offset_len),
         Not _Int (reg rtemp) (regv rtemp),
         -- JmpIf (regv rtemp) (lbl "undefined"),
         JmpIf (regv rtemp) (lbl "arrsum_end"),
