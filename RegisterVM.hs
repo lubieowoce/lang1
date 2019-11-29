@@ -24,7 +24,7 @@ import Data.Char (chr, ord)
 import Data.Coerce
 import Debug.Trace (trace)
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Data.Maybe (catMaybes)
 import Data.List (intersperse)
 
@@ -121,11 +121,11 @@ data Size
     | S64
     deriving (Eq, Ord, Enum, Show)
 
-sizeToBytes :: Size -> Int
-sizeToBytes S8  = 1
-sizeToBytes S16 = 2
-sizeToBytes S32 = 4
-sizeToBytes S64 = 8
+sizeNumBytes :: Size -> Int
+sizeNumBytes S8  = 1
+sizeNumBytes S16 = 2
+sizeNumBytes S32 = 4
+sizeNumBytes S64 = 8
 
 regSize :: Size
 regSize = S64
@@ -376,19 +376,27 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
                 val <- getVal size v vm
                 -- let (!val, x) = trace' "push :: " $ (_val, wordValToBytes _val)
                 let stackTopIx = stackTop . specialRegisters $ vm
-                let stackTopIx' = (sizeToBytes size) + stackTopIx
-                stack' <- (fromMaybe $ "bad stackTop: " ++ (show stackTopIx')) $
-                            pasteAt stackTopIx (wordValToBytes val) (stackMemory vm)
-                pure $ vm {stackMemory = stack', specialRegisters = (specialRegisters vm) {stackTop=stackTopIx'}}
+                    valSize = sizeNumBytes size
+                    stackTopIx' = stackTopIx - valSize
+                when (stackTopIx < 0) $
+                    Error $ "stack overflow when pushing " ++ (show val)
+                    ++ "(" ++ (show valSize) ++ "bytes)"
+                stack' <- (fromMaybe $ "bad ESP " ++ (show stackTopIx') ++ " when pushing " ++ (show val)) $
+                            pasteAt stackTopIx' (wordValToBytes val) (stackMemory vm)
+                pure $ vm { stackMemory = stack'
+                          , specialRegisters = (specialRegisters vm) {stackTop=stackTopIx'}
+                          }
             pop size dst vm = do
                 (val, vm2) <- pop' size vm
                 setLoc size dst val vm2
             pop' size vm = do
                 let stackTopIx = stackTop (specialRegisters vm)
-                    valSize = sizeToBytes size
-                    stackTopIx' = stackTopIx - valSize
-                val <- (fromMaybe $ "bad stackTop: " ++ (show stackTopIx)) $
-                            wordValFromBytes $ slice stackTopIx' valSize (stackMemory vm)
+                    valSize = sizeNumBytes size
+                    stackTopIx' = stackTopIx + valSize
+                when (stackTopIx' > (length $ stackMemory vm)) $
+                    Error $ "stack underflow when popping " ++ (show valSize) ++ " bytes"
+                val <- (fromMaybe $ "bad ESP " ++ (show stackTopIx) ++ " when popping " ++ (show valSize) ++ " bytes") $
+                            wordValFromBytes $ slice stackTopIx valSize (stackMemory vm)
                 let vm2 = vm {specialRegisters=(specialRegisters vm){stackTop=stackTopIx'}}
                 pure (val, vm2)
 
@@ -404,7 +412,7 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
                         StackBase -> stackBase
                         StackTop -> stackTop
             getVal size (OpValConst (Ref offset) addr) vm =
-                (fromMaybe  "invalid stack address or operand size") . wordValFromBytes . (slice (addr + offset) (sizeToBytes size)) . stackMemory $ vm
+                (fromMaybe  "invalid stack address or operand size") . wordValFromBytes . (slice (addr + offset) (sizeNumBytes size)) . stackMemory $ vm
             getVal size (OpValReg   (Ref offset) r   ) vm = do W64 addr <- getVal S64 (OpValReg Val r) vm
                                                                getVal size (OpValConst (Ref offset) (integral addr)) vm
 
@@ -460,7 +468,7 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
 
             pasteAt :: Int -> [a] -> [a] -> Maybe [a]
             pasteAt i xs ys
-                | i < 0 || i >= (length ys) || i+(length xs) >= (length ys) = Nothing
+                | i < 0 || i >= (length ys) || i+(length xs)-1 >= (length ys) = Nothing
                 | otherwise = Just $ (take i ys) ++ xs ++ (drop (i+(length xs)) ys) 
 
             snoc xs x = xs ++ [x]
@@ -483,7 +491,7 @@ prettyShowVM VM {codeMemory=ops, stackMemory=stack, generalRegisters = regs, spe
     where
         specs' = "ESP:" ++ (show stackTopIx) ++ " " ++ "EBP:" ++ (show stackBaseIx)
         regs' = (joinWith " " regs)
-        stack' = (joinWith " " <$>) . chunks 8 . take (stackTopIx) $ stack
+        stack' = map (joinWith' " ") . map (pad "_" 8) . map reverse . reverse . chunks 8 . reverse . map show . drop (stackTopIx) $ stack
         -- stack' = joinWith " " $ stack
         ops' = catMaybes . map (\i -> showOp i <$> (ops !? i)) $ [pc, pc+1, pc+2]
         showOp i op = (show i) ++ "  " ++ (show op) ++ (if i == pc then "  <--- " else "")
@@ -491,6 +499,10 @@ prettyShowVM VM {codeMemory=ops, stackMemory=stack, generalRegisters = regs, spe
         chunks n xs
             | (length xs) <= n = [xs]
             | otherwise = (take n xs) : (chunks n $ drop n xs) 
+        pad x len xs
+            | xslen < len = replicate (len - xslen) x ++ xs
+            | otherwise  = xs
+            where xslen = length xs
 
 
 separate sep s1 s2 = s1' ++ sep ++ s2'
@@ -498,7 +510,8 @@ separate sep s1 s2 = s1' ++ sep ++ s2'
         s1' = if null s1 then s1 else s1 ++ " "
         s2' = if null s2 then s2 else " " ++ s2
 
-joinWith sep = concat . intersperse sep . map show
+joinWith sep = joinWith' sep . map show
+joinWith' sep = concat . intersperse sep
 
 
 execProgram :: [Op] -> VM
@@ -506,8 +519,8 @@ execProgram ops = VM { codeMemory = ops
                      , stackMemory = replicate stackSize 0
                      , generalRegisters = replicate 10 0
                      , specialRegisters = SpecialRegisters {programCounter = InstructionIx 0
-                                                           , stackBase = 0
-                                                           , stackTop  = 0}}
+                                                           , stackBase = stackSize
+                                                           , stackTop  = stackSize}}
     where stackSize = 400
 
 iterVM :: VM -> [Either String VM]
@@ -538,7 +551,8 @@ _reg  i   = OpLocReg (Ref 0)   (GeneralRegister . GeneralRegisterId $ i)
 _regv i   = OpValReg (Ref 0)   (GeneralRegister . GeneralRegisterId $ i)
 int n    = OpValConst Val n
 
-sizeof = sizeToBytes
+neg = negate
+sizeof = sizeNumBytes
 _Char = S8
 _Int  = S64
 _Ptr  = S64
@@ -596,67 +610,74 @@ p0 = [bootstrap, ptostr, pstrrev, parrsum, pmain]
 
 bootstrap lbl = [
     ("_bootstrap", [
-        Push _Ptr ebpv,
-        Mov _Ptr ebp espv,
         Call (lbl "main"),
-        Mov _Ptr esp ebpv,
-        Pop _Ptr ebp,
         Push _Int (regv 0),
         SyscallExit ])
     ]
     where
 
 
-pmain lbl = [
-    -- main() -> int
+-- main() -> int
+pmain lbl = let
+        offset_out_str = neg $ (1+5)   * (sizeof _Char) 
+        offset_arr     = neg $ (1+5+2) * (sizeof _Char) + 4 * (sizeof _Int)
+    in [
     ("main", [
-        Nop,
-        Push _Char (int 1), 
-        Push _Char (int 0), -- out_str: [char, 5]
-        Push _Char (int 0),
-        Push _Char (int 0),
-        Push _Char (int 0),
-        Push _Char (int 0),
-        Push _Char (int 1), 
-        Push _Char (int 1), 
-        Push _Int  (int 1200), -- arr: [int, 4]
-        Push _Int  (int 40),
-        Push _Int  (int 20),
-        Push _Int  (int 10),
-        Push _Int  (int (-1)),
-        Lea (reg rtemp) (_ebpv $ (sizeof _Ptr) + 8*(sizeof _Char)), -- arr
         Push _Ptr ebpv,
         Mov _Ptr ebp espv,
+
+        Push _Char (int 1), 
+        Sub _Ptr esp espv (int $ 5 * sizeof _Char), -- out_str: [char, 5] 
+        Mov _Char (_ebp $ offset_out_str + 0 * (sizeof _Char)) (int 0),
+        Mov _Char (_ebp $ offset_out_str + 1 * (sizeof _Char)) (int 1),
+        Mov _Char (_ebp $ offset_out_str + 2 * (sizeof _Char)) (int 2),
+        Mov _Char (_ebp $ offset_out_str + 3 * (sizeof _Char)) (int 3),
+        Mov _Char (_ebp $ offset_out_str + 4 * (sizeof _Char)) (int 4),
+        Push _Char (int 1),
+        Push _Char (int 1),
+
+        Sub _Ptr esp espv (int $ 4 * sizeof _Int),  -- arr: [int, 4]
+        Mov _Int (_ebp $ offset_arr + 0 * (sizeof _Int)) (int 1200),
+        Mov _Int (_ebp $ offset_arr + 1 * (sizeof _Int)) (int   40),
+        Mov _Int (_ebp $ offset_arr + 2 * (sizeof _Int)) (int   20),
+        Mov _Int (_ebp $ offset_arr + 3 * (sizeof _Int)) (int   10),
+        Push _Int (int (-1)),
+
         Push _Int (int 4),      -- len(arr)
+        Lea (reg rtemp) (_ebpv $ offset_arr),
         Push _Ptr (regv rtemp), -- arr
         Call (lbl "arrsum"),
-        Mov _Ptr esp ebpv,
-        Pop _Ptr ebp,
-        Lea (reg rtemp) (_ebpv $ (sizeof _Ptr) + (sizeof _Char)), -- out_str
-        Push _Ptr (regv rtemp),
-        Push _Ptr ebpv,
-        Mov _Ptr ebp espv,
-        Push _Ptr (regv rtemp),  -- out_str
-        Push _Int (regv 0),      -- num
+        Add _Ptr esp espv (int $ (sizeof _Ptr) + (sizeof _Int)), -- arg cleanup
+
+        Lea (reg rtemp) (_ebpv $ offset_out_str),
+        Push _Ptr (regv rtemp), -- out_str
+        Push _Int (regv 0),     -- num
         Call (lbl "tostr"),
-        Mov _Ptr esp ebpv,
-        Pop _Ptr ebp,
-        Pop _Ptr (reg rtemp),
+        Add _Ptr esp espv (int $ (sizeof _Int) + (sizeof _Ptr)), -- arg cleanup
+
         Push _Int (regv 0),
+        Lea (reg rtemp) (_ebpv $ offset_out_str),
         Push _Ptr (regv rtemp),
         SyscallPrint,
-        Push _Int (_ebpv 0),
+        
+        Mov _Ptr esp ebpv,
+        Pop _Ptr ebp,
         Ret ])
     ]
     where
         rsum  = 0
         rtemp = 1
 
-pstrrev lbl = [
-    -- strrev(ptr: *char, len: int) -> int
+-- strrev(ptr: *char, len: int) -> int
+pstrrev lbl = let
+    offset_ptr = (sizeof _Ptr) + (sizeof _Int)
+    offset_len = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Ptr)
+    in [
     ("strrev", [
-        Mov _Ptr (reg rdst) (_ebpv $ sizeof _Int),
-        Add _Ptr (reg rdstback) (regv rdst) (_ebpv 0),
+        Push _Ptr ebpv,
+        Mov _Ptr ebp espv,
+        Mov _Ptr (reg rdst) (_ebpv $ offset_ptr),
+        Add _Ptr (reg rdstback) (regv rdst) (_ebpv $ offset_len),
         Decr _Ptr (reg rdstback) ]),
     ("strrev_loop", [
         Less _Ptr (reg rtemp) (regv rdst) (regv rdstback),
@@ -669,6 +690,8 @@ pstrrev lbl = [
         Decr _Ptr (reg rdstback),
         Jmp (lbl "strrev_loop") ]),
     ("strrev_end", [
+        Mov _Ptr esp ebpv,
+        Pop _Ptr ebp,
         Ret ])
     ]
     where
@@ -676,11 +699,18 @@ pstrrev lbl = [
         rdstback = 1
         rtemp    = 2
 
-ptostr lbl = [
-    -- tostr(n: int, out: *char) -> int
+-- tostr(n: int, out: *char) -> int
+ptostr lbl = let
+    offset_num = (sizeof _Ptr) + (sizeof _Int)
+    offset_out = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Int)
+    in [
+    
     ("tostr", [
-        Mov _Int (reg rnum) (_ebpv $ sizeof _Ptr),
-        Mov _Ptr (reg rdst) (_ebpv 0),
+        Push _Ptr ebpv,
+        Mov _Ptr ebp espv,
+
+        Mov _Int (reg rnum) (_ebpv $ offset_num),
+        Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Mov _Int (reg rlen) (int 0),
         Greater _Int (reg rtemp) (regv rnum) (int 0),
         JmpIf (regv rtemp) (lbl "tostr_loop"),
@@ -699,16 +729,16 @@ ptostr lbl = [
         Jmp (lbl "tostr_loop") ]),
     ("tostr_end", [
         Push _Int (regv rlen),
-        Mov _Ptr (reg rdst) (_ebpv 0),
-        Push _Ptr ebpv,
-        Mov _Ptr ebp espv,
+        Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Push _Int (regv rlen),
         Push _Ptr (regv rdst),
         Call (lbl "strrev"),
+        Add _Ptr esp espv (int $ (sizeof _Ptr) + (sizeof _Int)), -- arg cleanup
+        Pop _Int (reg rlen),
+        Mov _Int (reg 0) (regv rlen),
+
         Mov _Ptr esp ebpv,
         Pop _Ptr ebp,
-        Pop _Int (reg rlen),
-        Mov _Int (reg 0) (regv rlen), 
         Ret ])
     ]
     where
@@ -717,14 +747,21 @@ ptostr lbl = [
         rdst     = 2
         rtemp    = 3
 
-parrsum lbl = [
-    -- arrsum(ptr: *int, len: int) -> int
+-- arrsum(ptr: *int, len: int) -> int
+parrsum lbl = let
+    offset_ptr = (sizeof _Ptr) + (sizeof _Int) 
+    offset_len = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Ptr)
+    in [
+    
     ("arrsum", [
-        Mov _Ptr (reg rptr) (_ebpv $ (sizeof _Int)),
+        Push _Ptr ebpv,
+        Mov _Ptr ebp espv,
+
+        Mov _Ptr (reg rptr) (_ebpv $ offset_ptr),
         Mov _Int (reg rres) (int 0),
         Mov _Int (reg ri)   (int 0) ]),
     ("arrsum_loop", [
-        Less _Int (reg rtemp) (regv ri) (_ebpv $ 0),
+        Less _Int (reg rtemp) (regv ri) (_ebpv $ offset_len),
         Not _Int (reg rtemp) (regv rtemp),
         -- JmpIf (regv rtemp) (lbl "undefined"),
         JmpIf (regv rtemp) (lbl "arrsum_end"),
@@ -734,6 +771,9 @@ parrsum lbl = [
         Jmp (lbl "arrsum_loop") ]),
     ("arrsum_end", [
         Mov _Int (reg 0) (regv rres),
+
+        Mov _Ptr esp ebpv,
+        Pop _Ptr ebp,
         Ret ])
     ]
      where
