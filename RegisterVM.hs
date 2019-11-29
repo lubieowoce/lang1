@@ -646,7 +646,7 @@ pmain lbl = let
         Push _Char (int 1),
 
         Sub _Ptr esp espv (int $ 4 * sizeof _Int),  -- arr: [int, 4]
-        Mov _Int (_ebp $ offset_arr + 0 * (sizeof _Int)) (int 1200),
+        Mov _Int (_ebp $ offset_arr + 0 * (sizeof _Int)) (int (-1200)),
         Mov _Int (_ebp $ offset_arr + 1 * (sizeof _Int)) (int   40),
         Mov _Int (_ebp $ offset_arr + 2 * (sizeof _Int)) (int   20),
         Mov _Int (_ebp $ offset_arr + 3 * (sizeof _Int)) (int   10),
@@ -677,7 +677,7 @@ pmain lbl = let
         rsum  = 0
         rtemp = 1
 
--- strrev(ptr: *char, len: uint) -> uint
+-- strrev(ptr: *char, len: uint) -> ()
 pstrrev lbl = let
     offset_ptr = (sizeof _Ptr) + (sizeof _Int)
     offset_len = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Ptr)
@@ -708,24 +708,36 @@ pstrrev lbl = let
         rdstback = 1
         rtemp    = 2
 
--- tostr(n: uint, out: *char) -> uint
+-- tostr(n: int, out: *char) -> uint
 ptostr lbl = let
     offset_num = (sizeof _Ptr) + (sizeof _Int)
     offset_out = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Int)
+    offset_was_signed = neg $ (sizeof _Int)
     in [
     
     ("tostr", [
         Push _Ptr ebpv,
         Mov _Ptr ebp espv,
 
+        Sub _Ptr esp espv (int $ sizeof _Int), -- was_signed: int
+        Mov _Int (_ebp $ offset_was_signed) (int 0),
+
         Mov _Int (reg rnum) (_ebpv $ offset_num),
         Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Mov _Int (reg rlen) (int 0),
+
         Greater _Int Unsigned (reg rtemp) (regv rnum) (int 0),
-        JmpIf (regv rtemp) (lbl "tostr_loop"),
+        JmpIf (regv rtemp) (lbl "tostr_signed"),
         Mov _Char (_reg rdst) (int 48),
         Mov _Int (reg 0) (int 1),
         Ret ]),
+    ("tostr_signed", [
+        Less _Int Signed (reg rtemp) (regv rnum) (int 0),
+        Not _Int (reg rtemp) (regv rtemp),
+        JmpIf (regv rtemp) (lbl "tostr_loop"),
+        Mul _Int (reg rnum) (int (-1)) (regv rnum), 
+        Mov _Int (_ebp $ offset_num) (regv rnum),
+        Mov _Int (_ebp $ offset_was_signed) (int 1) ]),
     ("tostr_loop", [
         LessEqual _Int Unsigned (reg rtemp) (regv rnum) (int 0),
         JmpIf (regv rtemp) (lbl "tostr_end"),
@@ -737,10 +749,15 @@ ptostr lbl = let
         Incr _Int (reg rlen),
         Jmp (lbl "tostr_loop") ]),
     ("tostr_end", [
+        Not _Int (reg rtemp) (_ebpv $ offset_was_signed),
+        JmpIf (regv rtemp) (lbl "tostr_end2"),
+        Mov _Char (_reg rdst) (int 45), -- '-'
+        Incr _Int (reg rlen) ]),
+    ("tostr_end2", [
         Push _Int (regv rlen),
 
-        Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Push _Int (regv rlen),
+        Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Push _Ptr (regv rdst),
         Call (lbl "strrev"),
         Add _Ptr esp espv (int $ (sizeof _Ptr) + (sizeof _Int)), -- arg cleanup
@@ -758,7 +775,7 @@ ptostr lbl = let
         rdst     = 2
         rtemp    = 3
 
--- arrsum(ptr: *uint, len: int) -> uint
+-- arrsum(ptr: *int, len: uint) -> int
 parrsum lbl = let
     offset_ptr = (sizeof _Ptr) + (sizeof _Int) 
     offset_len = (sizeof _Ptr) + (sizeof _Int) + (sizeof _Ptr)
