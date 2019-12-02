@@ -8,7 +8,7 @@
 
 module RegisterVM where
 
-import StackVM (Running (..), Running', VMRequest (..), setAt, intToBool, boolToInt)
+import Util
 
 import Data.Map (Map)
 import qualified Data.Map as M
@@ -23,11 +23,9 @@ import Data.Bits
 import Data.Char (chr, ord)
 
 import Data.Coerce
-import Debug.Trace (trace)
 
 import Control.Monad (forM, forM_, when)
 import Data.Maybe (catMaybes)
-import Data.List (intersperse)
 
 import Control.Exception (SomeException, try, evaluate)
 -- import System.IO.Unsafe (unsafePerformIO, unsafeInterleaveIO)
@@ -481,14 +479,6 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
 
             slice start len = take len . drop start 
 
-(!?) :: [a] -> Int -> Maybe a
-xs !? i 
-    | (i >= 0) && (i < length xs) = Just $ xs !! i
-    | otherwise = Nothing 
-
-
-trace' s x = trace (s ++ " " ++ (show x)) x 
-
 
 
 prettyShowVM :: VM -> String
@@ -510,14 +500,6 @@ prettyShowVM VM {codeMemory=ops, stackMemory=stack, generalRegisters = regs, spe
             | otherwise  = xs
             where xslen = length xs
 
-
-separate sep s1 s2 = s1' ++ sep ++ s2'
-    where
-        s1' = if null s1 then s1 else s1 ++ " "
-        s2' = if null s2 then s2 else " " ++ s2
-
-joinWith sep = joinWith' sep . map show
-joinWith' sep = concat . intersperse sep
 
 
 execProgram :: [Op] -> VM
@@ -812,15 +794,16 @@ parrsum lbl = let
 
 
 
+main = resolveAndrun p0
 
-main = do
+resolveAndrun prog = do
     -- forM_ (W64 <$> [0..16] ++ [255] ++ [256, 512, 1024, maxBound]) $ \x@(W64 xv) -> do
     --     let Just x'@(W64 x'v) = wordValFromBytes . wordValToBytes $ x
     --     putStrLn $ (show x) ++ " " ++ (show x') ++ " " ++ (if xv == x'v then "OK" else "FAILED") 
 
     -- let DDef funId args body = defAdd1 in
     --     print $ evalCompile $ compileDef funId args body
-    case resolveLabels p0 of
+    case resolveLabels prog of
 
         Left msg -> do
             putStrLn $ "Compilation error: " ++ msg
