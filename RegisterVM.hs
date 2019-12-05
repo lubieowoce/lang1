@@ -318,16 +318,16 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
             Incr size loc              ->  incrop size (+ 1)        loc vm'
             Decr size loc              ->  incrop size (subtract 1) loc vm'
             
-            Equal        size      dst a b  ->  binop' size Unsigned (==) dst a b vm' 
-            Less         size sign dst a b  ->  binop' size sign     (<)  dst a b vm'
-            Greater      size sign dst a b  ->  binop' size sign     (>)  dst a b vm' 
-            LessEqual    size sign dst a b  ->  binop' size sign     (<=) dst a b vm' 
-            GreaterEqual size sign dst a b  ->  binop' size sign     (>=) dst a b vm'
+            Equal        size      dst a b  ->  boolop size Unsigned (==) dst a b vm' 
+            Less         size sign dst a b  ->  boolop size sign     (<)  dst a b vm'
+            Greater      size sign dst a b  ->  boolop size sign     (>)  dst a b vm' 
+            LessEqual    size sign dst a b  ->  boolop size sign     (<=) dst a b vm' 
+            GreaterEqual size sign dst a b  ->  boolop size sign     (>=) dst a b vm'
 
             Not size dst x             ->  unop' size (not) dst x vm'
 
             Jmp     loc           ->  jmp loc vm
-            JmpIf x loc           ->  do W64 xv <- getVal S64 x vm
+            JmpIf x loc           ->  do W8 xv <- getVal S8 x vm
                                          if (intToBool . integral $ xv) then jmp loc vm else pure vm'
 
             Call loc              ->  do vm2 <- push S64 (OpValConst Val $ pc+1) vm
@@ -343,8 +343,21 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
                                             then Error "bad print syscall"
                                             else Request (Print str (\_ -> pure vm3))
         where
-            binop' size sign (f :: forall a . Integral a => a -> a -> Bool) =
-                binop size sign (\a b -> if f a b then 1 else 0)
+            boolop size sign (f :: forall a . Integral a => a -> a -> Bool) dst a b vm = do
+                av <- getVal size a vm
+                bv <- getVal size b vm
+                let  f' :: forall a . Integral a => a -> a -> W.Word8
+                     f' = \a b -> if f a b then 1 else 0 
+                let res = case (promoteSize av bv, sign) of
+                            ((W8  a, W8  b), Unsigned) -> W8 $ f' a b
+                            ((W16 a, W16 b), Unsigned) -> W8 $ f' a b
+                            ((W32 a, W32 b), Unsigned) -> W8 $ f' a b
+                            ((W64 a, W64 b), Unsigned) -> W8 $ f' a b
+                            ((W8  a, W8  b), Signed  ) -> W8 $ integral $ f' (integral a :: I.Int8 ) (integral b :: I.Int8 )
+                            ((W16 a, W16 b), Signed  ) -> W8 $ integral $ f' (integral a :: I.Int16) (integral b :: I.Int16)
+                            ((W32 a, W32 b), Signed  ) -> W8 $ integral $ f' (integral a :: I.Int32) (integral b :: I.Int32)
+                            ((W64 a, W64 b), Signed  ) -> W8 $ integral $ f' (integral a :: I.Int64) (integral b :: I.Int64)
+                setLoc S8 dst res $ vm
             binop size sign (f :: forall a . Integral a => a -> a -> a) dst a b vm = do
                 av <- getVal size a vm
                 bv <- getVal size b vm
@@ -509,7 +522,7 @@ execProgram ops = VM { codeMemory = ops
                      , specialRegisters = SpecialRegisters {programCounter = InstructionIx 0
                                                            , stackBase = stackSize
                                                            , stackTop  = stackSize}}
-    where stackSize = 400
+    where stackSize = 800
 
 iterVM :: VM -> [Either String VM]
 iterVM vm = (Right vm) : (iterVM' $ step vm) where
@@ -804,20 +817,18 @@ resolveAndrun prog = do
     -- let DDef funId args body = defAdd1 in
     --     print $ evalCompile $ compileDef funId args body
     case resolveLabels prog of
+        Left msg -> putStrLn $ "Compilation error: " ++ msg
+        Right prog -> run prog
 
-        Left msg -> do
-            putStrLn $ "Compilation error: " ++ msg
-
-        Right prog -> do
-            printCode prog
-            blank
-            blank
-            let vm = execProgram prog
-            forM_ (iterVM vm) $
-                either putStrLn (\x -> putStrLn (prettyShowVM x) >> blank)
-
+run :: [Op] -> IO ()
+run prog = do
+    printCode prog
+    blank
+    blank
+    let vm = execProgram prog
+    forM_ (iterVM vm) $
+        either putStrLn (\x -> putStrLn (prettyShowVM x) >> blank)
     where
-        print' x = print x >> blank 
         blank = putStrLn ""
         printCode = mapM putStrLn . map (uncurry showLine) . zip [0..]
         showLine n c = show n ++ "\t" ++ show c
