@@ -32,6 +32,7 @@ import Control.Exception (SomeException, try, evaluate)
 import System.IO.Unsafe
 import GHC.Generics (Generic)
 import Control.DeepSeq (force, NFData)
+import Debug.Trace (trace)
 
 import Data.Bifunctor (first, second)
 import Data.List (mapAccumL)
@@ -171,22 +172,22 @@ wordValFromBytes :: [W.Word8] -> Maybe WordVal
 wordValFromBytes x = case x of 
      [x0] ->
         Just $ W8 x0
-     [x8, x0] ->
-        Just $ W16 $ ((to16 x8) `shiftL` 8) .|. (to16 x0)
-     [x24, x16, x8, x0] -> Just $ W32 $
-        (    (to32 x24) `shiftL` 24)
-        .|. ((to32 x16) `shiftL` 16)
+     [x0, x8] ->
+        Just $ W16 $ (to16 x0) .|. ((to16 x8) `shiftL` 8)
+     [x0, x8, x16, x24] -> Just $ W32 $
+        (    (to32  x0) 
         .|. ((to32  x8) `shiftL`  8)
-        .|.   (to32 x0) 
-     [x56, x48, x40, x32, x24, x16, x8, x0] -> Just $ W64 $
-        (    (to64 x56) `shiftL` 56)
-        .|. ((to64 x48) `shiftL` 48)
-        .|. ((to64 x40) `shiftL` 40)
-        .|. ((to64 x32) `shiftL` 32)
-        .|. ((to64 x24) `shiftL` 24)
-        .|. ((to64 x16) `shiftL` 16)
+        .|. ((to32 x16) `shiftL` 16)
+        .|. ((to32 x24) `shiftL` 24) )
+     [x0, x8, x16, x24, x32, x40, x48, x56] -> Just $ W64 $
+        (    (to64  x0) 
         .|. ((to64  x8) `shiftL`  8)
-        .|.   (to64 x0) 
+        .|. ((to64 x16) `shiftL` 16)
+        .|. ((to64 x24) `shiftL` 24)
+        .|. ((to64 x32) `shiftL` 32)
+        .|. ((to64 x40) `shiftL` 40)
+        .|. ((to64 x48) `shiftL` 48)
+        .|. ((to64 x56) `shiftL` 56) )
      _ -> Nothing
     where
       to16 :: W.Word8 -> W.Word16
@@ -199,21 +200,21 @@ wordValFromBytes x = case x of
 wordValToBytes :: WordVal -> [W.Word8] 
 wordValToBytes x = case x of 
     W8 x -> [x]
-    W16 x -> [(to8 $ x `shiftR` 8), (to8 x)]
+    W16 x -> [(to8 x), (to8 $ x `shiftR` 8)]
     W32 x -> 
-        [ (to8 $ x `shiftR` 24)
-        , (to8 $ x `shiftR` 16)
+        [ (to8 x)
         , (to8 $ x `shiftR`  8)
-        , (to8 x) ]
+        , (to8 $ x `shiftR` 16)
+        , (to8 $ x `shiftR` 24) ]
     W64 x -> 
-        [ (to8 $ x `shiftR` 56)
-        , (to8 $ x `shiftR` 48)
-        , (to8 $ x `shiftR` 40)
-        , (to8 $ x `shiftR` 32)
-        , (to8 $ x `shiftR` 24)
-        , (to8 $ x `shiftR` 16)
+        [ (to8 x)
         , (to8 $ x `shiftR`  8)
-        , (to8 x) ]
+        , (to8 $ x `shiftR` 16)
+        , (to8 $ x `shiftR` 24)
+        , (to8 $ x `shiftR` 32)
+        , (to8 $ x `shiftR` 40)
+        , (to8 $ x `shiftR` 48)
+        , (to8 $ x `shiftR` 56) ]
     where
       to8 :: (Integral a) => a -> W.Word8
       to8 = integral
@@ -430,8 +431,10 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
                         StackTop -> stackTop
             getVal size (OpValConst (Ref offset) addr) vm =
                 (fromMaybe  "invalid stack address or operand size") . wordValFromBytes . (slice (addr + offset) (sizeNumBytes size)) . stackMemory $ vm
-            getVal size (OpValReg   (Ref offset) r   ) vm = do W64 addr <- getVal S64 (OpValReg Val r) vm
-                                                               getVal size (OpValConst (Ref offset) (integral addr)) vm
+
+            getVal size (OpValReg   (Ref offset) r   ) vm = do
+                W64 addr <- getVal S64 (OpValReg Val r) vm
+                getVal size (OpValConst (Ref offset) (integral addr)) vm
 
 
             setLoc :: (Functor r) => Size -> OpLoc -> WordVal -> VM -> Running' r VM 
@@ -455,7 +458,7 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
             -- setLoc size (OpLocAddr (HeapAddress addr))  val vm = do hmem <- (fromMaybe  "invalid heap address")  . (M.insert addr val) . heapMemory $ vm; pure vm {heapMemory=hmem}
 
             getLoc :: (Functor r) => Size -> OpVal -> VM -> Running' r WordVal
-            getLoc size (OpValConst (Ref offset) addr) vm = pure . W64 . fromIntegral . toInteger $ (addr + offset)
+            getLoc size (OpValConst (Ref offset) addr) vm = pure . W64 . integral $ (addr + offset)
             getLoc size (OpValReg   (Ref offset) r   ) vm = do W64 addr <- getVal size (OpValReg Val r) vm;
                                                                getLoc size (OpValConst (Ref offset) (integral addr)) vm
             getLoc _ x _ = Error $ "invalid operand for LEA: " ++ (show x)

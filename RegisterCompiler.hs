@@ -44,7 +44,6 @@ import Data.Bifunctor (Bifunctor, bimap, first, second)
 import Data.Semigroup
 
 import Data.Coerce (coerce)
-import Debug.Trace (trace)
 
 
 -- ##################
