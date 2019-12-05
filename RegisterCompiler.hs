@@ -61,6 +61,7 @@ data Stmt
     = SPass
     | SNewVar VarId TypeId Expr
     | SSetVar VarId Expr
+    | SSetIndex VarId Expr Expr
     | SIfThenElse Expr [Stmt] [Stmt]
     | SWhile Expr [Stmt]
     | SForFromTo VarId TypeId Expr Expr [Stmt]
@@ -76,6 +77,8 @@ data Expr
     | E1 Op1 Expr
     | E2 Op2 Expr Expr
     | EApp FunId [Expr]
+    | EIndex Expr Expr
+    | EArrayLiteral TypeId [Expr]
     -- | ECast Expr TypeId
     -- | EIfThenElse Expr Expr Expr
     -- | ELet VarId Expr Expr
@@ -88,11 +91,13 @@ type FunId  = String
 data TypeId
     = SimpleType String
     | ParametrizedType String [TypeId]
+    | ArrayType TypeId Int
     deriving (Eq)
 
 instance Show TypeId where
     show (SimpleType name) = name
     show (ParametrizedType name params) = name ++ (brackets . joinWith ", " $ params)
+    show (ArrayType elType size) = brackets $ (show elType) ++ ", " ++ (show size)
 
 
 type StackFrameOffset = Int
@@ -108,6 +113,7 @@ data TType
     = TBool
     | TChar
     | TPtr TType
+    | TArray TType Int
     | TNum NumType
     | TUnit
     | TEmpty
@@ -120,7 +126,8 @@ instance Show TType where
     show (TNum TUInt)  = "uint"
     show TUnit         = "()"  
     show TEmpty     = "!"   
-    show (TPtr typ)    = "ptr[" ++ (show typ) ++ "]" 
+    show (TPtr typ)    = "ptr[" ++ (show typ) ++ "]"
+    show (TArray typ size)    = "[" ++ (show typ) ++ ", " ++ (show size) ++ "]"
 
 data NumType
     = TInt
@@ -145,6 +152,7 @@ showBlock b = "{\n" ++ (joinWith' "" . map indent' . map show $ b) ++ "}\n"
 
 instance Show Stmt where
     show (SPass) = "pass"
+    show (SSetIndex var ix expr) = (showVarId var) ++ (brackets . show $ ix) ++ " = " ++ (show expr) 
     show (SNewVar var typeId expr) = (showVarId var) ++ ": " ++ (show typeId) ++ " <- " ++ (show expr)
     show (SSetVar var expr) = (showVarId var) +=+ (show expr)
     show (SIfThenElse cond trueBody falseBody) = 
@@ -159,7 +167,9 @@ instance Show Stmt where
 
 
 instance Show Expr where
+    show (EIndex expr ix) = (parens . show $ expr) ++ (brackets . show $ ix)
     show (ENum n t) = showNum n t
+    show (EArrayLiteral t elems) = show elems
     show (EVar v) = showVarId v
     show (E1 op x) = parens ((show op) ++ (show x))
     show (E2 op a b) = parens ((show a) +|+ (show op) +|+ (show b))
@@ -338,6 +348,7 @@ withVars vs ca = do
 
 
 resolveType :: TypeId -> Compile TType
+resolveType (ArrayType elTypeId size) = TArray <$> resolveType elTypeId <*> pure size
 resolveType (SimpleType name) = case name of
     "bool" -> pure TBool
     "char" -> pure TChar
@@ -422,7 +433,9 @@ data FlowNode x l
     deriving (Eq, Show, Functor)
 
 data BasicStmt
-    = BSetVar TType VarId BasicExpr 
+    = BSetVar TType VarId BasicExpr
+    | BSetIndex TType VarId BasicExpr BasicExpr
+    | BGetIndex TType VarId BasicExpr BasicExpr
     | B1 TType VarId Op1 BasicExpr
     | B2 TType VarId Op2 BasicExpr BasicExpr
     | BApp TType VarId FunId [BasicExpr]
@@ -430,7 +443,7 @@ data BasicStmt
 
 data BasicExpr
     = BVar TType VarId 
-    | BNum NumType Int 
+    | BNum NumType Int
     deriving (Eq)
 
 
@@ -463,9 +476,13 @@ graphLabels = map fst . M.toList . nodes
 instance Show BasicExpr where
     show (BVar typ v) = (showVarId v) -- ++ ": " ++ (show typ) 
     show (BNum ntyp n) = showNum n ntyp
+    -- show (BIndex _ v ix) = (showVarId v) ++ (brackets . show $ ix)
+
 
 instance Show BasicStmt where
     show (BSetVar _ v x)       = (showVarId v) +=+ (show x)
+    show (BSetIndex _ v ix expr) = (showVarId v) ++ (brackets . show $ ix) +=+ (show expr)
+    show (BGetIndex _ v x ix)    = (showVarId v) +=+ (parens . show $ x) ++ (brackets . show $ ix)
     show (B1 _ v op x)         = (showVarId v) +=+ (show op) ++ (show x)
     show (B2 _ v op a b)       = (showVarId v) +=+ ((show a) +|+ (show op) +|+ (show b))
     show (BApp _ v f exprs)    = (showVarId v) +=+ (f ++ (parens . concat . intersperse ", " . map show $ exprs))
@@ -516,6 +533,14 @@ flowGraph (DDef funId argsAndTypes retTypeId body) = do
                 (next, graph) <- go ctxs graph stmts
                 let node = block' [BSetVar typ var expr'] next
                 pure $ (computeExpr, insertNode l node graph)
+            SSetIndex var ix expr -> do
+                l <- freshLabel
+                typ <- getVarType var `orError'` ("undefined variable: " ++ var)
+                (expr', computeExpr, graph) <- computeBlock expr typ          graph l
+                (ix',   computeIx,   graph) <- computeBlock ix   (TNum TUInt) graph computeExpr
+                (next, graph) <- go ctxs graph stmts
+                let node = block' [BSetIndex typ var ix' expr'] next
+                pure $ (computeIx, insertNode l node graph)
             SIfThenElse cond trueBody falseBody -> do
                 ifCond <- freshLabel
                 (condExpr, computeCond, graph) <- computeBlock cond TBool graph ifCond 
@@ -587,7 +612,13 @@ flowGraph (DDef funId argsAndTypes retTypeId body) = do
 
 
 exprType :: Expr -> Compile TType
-exprType e@(ENum n ntyp) = pure $ TNum ntyp
+exprType (ENum n ntyp) = pure $ TNum ntyp
+exprType (EArrayLiteral typ elems) = TArray <$> resolveType typ <*> pure (length elems)
+exprType (EIndex expr ix) = do
+    te <- exprType expr
+    assertIsNumericExpr ix
+    elType <- assertIsArrayLikeType te
+    pure elType
 exprType (EVar v) = getVarType v `orError'` ("undefined variable: " ++ v)
 exprType (E1 op x) = case op of
     OpNot -> do
@@ -649,6 +680,10 @@ assertSameType a b = do
         ++" and " ++ (show b) ++ " has type " ++ (show tb)
     pure ta
 
+assertIsArrayLikeType :: TType -> Compile TType
+assertIsArrayLikeType (TArray elType _) = pure $ elType
+assertIsArrayLikeType (TPtr   elType)   = pure $ elType
+assertIsArrayLikeType t = throwE $ "type " ++ (show t) ++ " is not indexable" 
 
 
 toBasicExpr :: Expr -> TType -> Compile (BasicExpr, [BasicStmt])
@@ -658,6 +693,32 @@ toBasicExpr expr typ = do
 
 toBasicExpr' :: Expr -> TType -> Compile (BasicExpr, [BasicStmt])
 toBasicExpr' (ENum n ntyp) _ = pure (BNum ntyp n, [])
+toBasicExpr' (EArrayLiteral elTypeId elems) _ = do
+    elType <- resolveType elTypeId 
+    arr <- freshVarId
+    let arrType = TArray elType (length elems)
+    declVarType arr $ arrType
+    elemInits <- forM (zip [0..] elems) $ \(i, expr) -> do
+        (val, valInit) <- toBasicExpr' expr elType
+        let setIVal = BSetIndex elType arr (BNum TUInt i) val
+        pure $ valInit ++ [setIVal]
+    pure (BVar arrType arr, concat elemInits)
+toBasicExpr' (EIndex expr ix) _ = do
+    ti <- exprType ix
+    numType <- assertIsNumericType ti
+    (ix', ixInit) <- toBasicExpr ix ti
+
+    te <- exprType expr
+    elType <- assertIsArrayLikeType te
+    (expr', exprInit) <- toBasicExpr expr te
+
+    r <- freshVarId
+    declVarType r elType
+    let getIntoR = BGetIndex elType r expr' ix'
+
+    pure (BVar elType r, ixInit ++ exprInit ++ [getIntoR])
+
+
 toBasicExpr' (EVar v) typ = pure (BVar typ v, [])
 toBasicExpr' e@(E1 op x) typ  = do
     -- need type signature of op!!!!
@@ -768,8 +829,8 @@ reorder :: Label -> FlowGraph x Label -> FlowGraph x Label
 reorder entry graph = let order = someOrder entry graph in renameLabels order graph
 
 
-findUsedVars :: FlowGraph x Label -> [VarId]
-findUsedVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock . map snd . M.toList . nodes
+-- findUsedVars :: FlowGraph x Label -> [VarId]
+-- findUsedVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock . map snd . M.toList . nodes
 
 
 
@@ -839,10 +900,12 @@ liveness graph = (`execState` graph') $ mapM_ (go S.empty) endLabels where
         nodeVars' (IfThenElse {cond=cond}) = (basicExprVars' cond, S.empty)
         nodeVars' (Return {expr=expr})     = (basicExprVars' expr, S.empty)
 
-        basicStmtVars' (BSetVar _ v x)    = (basicExprVars' x,                                v)
-        basicStmtVars' (B1 _ v _ x)       = (basicExprVars' x,                                v)
-        basicStmtVars' (B2 _ v _ a b)     = ((basicExprVars' a) `S.union` (basicExprVars' b), v)
-        basicStmtVars' (BApp _ v f exprs) = (S.unions . map basicExprVars' $ exprs,           v)
+        basicStmtVars' (BSetVar _ v x)      = (basicExprVars' x,                                 v)
+        basicStmtVars' (BSetIndex _ v ix x) = ((basicExprVars' ix) `S.union` (basicExprVars' x), v)
+        basicStmtVars' (BGetIndex _ v x ix) = ((basicExprVars' ix) `S.union` (basicExprVars' x), v)
+        basicStmtVars' (B1 _ v _ x)         = (basicExprVars' x,                                 v)
+        basicStmtVars' (B2 _ v _ a b)       = ((basicExprVars' a) `S.union` (basicExprVars' b),  v)
+        basicStmtVars' (BApp _ v f exprs)   = (S.unions . map basicExprVars' $ exprs,            v)
 
         basicExprVars' = S.fromList . basicExprVars
 
@@ -867,6 +930,9 @@ basicExprToOpLoc (BVar _ v) = varLocToOpLoc <$> getVarLoc v `orError'` ("undefin
 
 varToOpLoc :: VarId -> Compile OpLoc
 varToOpLoc v = varLocToOpLoc <$> getVarLoc v `orError'` ("undefined variable: " ++ v)
+
+varToOpVal :: VarId -> Compile OpVal
+varToOpVal v = varLocToOpVal <$> getVarLoc v `orError'` ("undefined variable: " ++ v)
 
 
 
@@ -990,6 +1056,43 @@ compileBasicStmt (BSetVar t v x)  = do
     v' <- varToOpLoc v
     x' <- basicExprToOpVal x
     pure [Mov t v' x']
+compileBasicStmt (BSetIndex elType v i x)  = do
+    v' <- varToOpVal v
+    i' <- basicExprToOpVal i
+    x' <- basicExprToOpVal x
+    addr   <- pure $ GeneralRegister . GeneralRegisterId $ 1 -- FIXME - temp location
+    offset <- pure $ GeneralRegister . GeneralRegisterId $ 2 -- FIXME - temp location
+    elSize <- typeSizeBytes elType
+    let 
+        addrV = OpValReg Val addr
+        addrL = OpLocReg Val addr
+        _addrV = OpValReg (Ref 0) addr
+        _addrL = OpLocReg (Ref 0) addr
+        offsetV = OpValReg Val offset
+        offsetL = OpLocReg Val offset
+    pure ([ Mov (TPtr elType) addrL v'
+          , Lea addrL _addrV  
+          , Mul (TNum TUInt) offsetL i' (OpValConst Val $ elSize)
+          , Add (TPtr elType) addrL addrV offsetV
+          , Mov elType _addrL x' ] :: [OpIR2])
+compileBasicStmt (BGetIndex elType v x i)  = do
+    v' <- varToOpLoc v
+    x' <- basicExprToOpVal x
+    i' <- basicExprToOpVal i
+    elSize <- typeSizeBytes elType
+    let 
+        addr   = GeneralRegister . GeneralRegisterId $ 1 -- FIXME - temp location
+        offset = GeneralRegister . GeneralRegisterId $ 2 -- FIXME - temp location
+        addrV = OpValReg Val addr
+        addrL = OpLocReg Val addr
+        _addrV = OpValReg (Ref 0) addr
+        offsetV = OpValReg Val offset
+        offsetL = OpLocReg Val offset
+    pure $ [ Mov (TPtr elType) addrL x'
+           , Lea addrL _addrV
+           , Mul (TNum TUInt) offsetL i' (OpValConst Val $ elSize)
+           , Add (TPtr elType) addrL addrV offsetV
+           , Mov elType v' _addrV]
 compileBasicStmt (B1 t v op x)   = do
     v' <- varToOpLoc v
     x' <- basicExprToOpVal x
@@ -1070,6 +1173,7 @@ typeSizeBytes TChar         = pure 1
 typeSizeBytes (TNum TInt)   = pure 8
 typeSizeBytes (TNum TUInt)  = pure 8
 typeSizeBytes (TPtr _)      = pure 8
+typeSizeBytes (TArray elType size) = (size *) <$> typeSizeBytes elType
 
 
 
@@ -1229,6 +1333,7 @@ toVMSize (TNum TUInt)  = RegisterVM.S64
 toVMSize TUnit         = undefined
 toVMSize TEmpty        = undefined
 toVMSize (TPtr _)      = RegisterVM.S64
+toVMSize (TArray t _)  = toVMSize (TPtr t)
 
 toVMSignedness  :: TType -> RegisterVM.Signedness
 toVMSignedness TBool         = RegisterVM.Unsigned
@@ -1238,6 +1343,7 @@ toVMSignedness (TNum TUInt)  = RegisterVM.Unsigned
 toVMSignedness TUnit         = undefined
 toVMSignedness TEmpty        = undefined
 toVMSignedness (TPtr _)      = RegisterVM.Unsigned
+toVMSignedness (TArray t _)  = toVMSignedness (TPtr t)
 
 toVMOpLoc :: OpLoc -> RegisterVM.OpLoc
 toVMOpLoc (OpLocReg ref reg) = (RegisterVM.OpLocReg ref' reg') where ref' = toVMRef ref; reg' = toVMRegister reg; 
@@ -1269,10 +1375,11 @@ eLess         = E2 OpLess
 eGreater      = E2 OpGreater
 eLessEqual    = E2 OpLessEqual
 eGreaterEqual = E2 OpGreaterEqual
-tt = SimpleType
 
+tt = SimpleType
 uu = (`ENum` TUInt)
 ii = (`ENum` TInt)
+ptr = ParametrizedType "ptr" . pure
 
 e1 = (eAdd
         (uu 3)
@@ -1347,11 +1454,42 @@ p4 = DDef "pred" [("x", tt "uint")] (tt "uint") [
 
 
 
+p5 = DDef "sum" [("xs", ptr (tt "int")), ("len", (tt "uint"))] (tt "int") [
+        SNewVar "res" (tt "int") (ii 0),
+        SForFromTo "i" (tt "uint") (uu 0) (EVar "len") [
+            SSetVar "res" $ eAdd (EVar "res") ((EVar "xs") `EIndex` (EVar "i")) 
+        ],
+        SReturn (EVar "res")
+    ]
+
+p5main = DDef "main" [] (tt "int") [
+        -- SReturn (eEqual (uu 21) (EApp "fib'" [uu 7]))
+        SNewVar "arr" (ArrayType (tt "int") 4) (
+            EArrayLiteral (tt "int")
+                [ (ii 1)
+                , (ii 2)
+                , (ii 3)
+                , (ii 4) ]
+            ),
+        -- SReturn (eEqual (ii 10) (EApp "sum" [EVar "arr", (uu 4)]))
+        SReturn (foldr1 eAdd $ map (EIndex (EVar "arr") . uu) [0..3])
+    ]
+
+m5 = Module [p5, p5main]
+
+
 main = either (putStrLn . ("Error: "++)) pure  =<<  (runExceptT mainE)
 
 mainE :: ExceptT String IO ()
 mainE = do
-    ops <- ExceptT . pure $ evalCompile (compileModule m2 `catchE` (\e -> do state <- get; throwE $ e ++ "\nstate:\n" ++(show state)))
+    let mod@(Module funs) = m5
+    lift $ mapM_ print funs
+    ops <- ExceptT . pure $
+        evalCompile
+            (compileModule mod
+                `catchE` (\e -> do
+                    state <- get
+                    throwE $ e ++ "\nstate:\n" ++(show state)))
     let ops' = toVMOp <$> ops
     lift $ RegisterVM.run ops'
     -- -- (_, vars) <- ExceptT . pure $ evalCompile (toBasicExpr e1)
@@ -1395,7 +1533,7 @@ mainE = do
     -- lift $ putStrLn "compiled, result:"
     -- result <- ExceptT . pure $ evalCompile (toVMProc cprog2)
     -- lift $ printCode $ RegisterVM.code result
-                                                                                      where
+    where
         blank = putStrLn "\n" 
         fromRight (Right x) = x 
         fromRight (Left y) = error $ "fromRight: " ++ (show y)  
