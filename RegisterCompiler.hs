@@ -19,6 +19,10 @@
 --          mov R0 R1
 
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, FlexibleContexts #-}
+{-# LANGUAGE KindSignatures, StandaloneDeriving #-}
+
+
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 
 module RegisterCompiler where
@@ -42,6 +46,9 @@ import Control.Monad (forM)
 
 import Data.Bifunctor (Bifunctor, bimap, first, second)
 import Data.Semigroup
+
+import Data.Void (Void, absurd)
+import Data.Functor.Const (Const (..))
 
 import Data.Coerce (coerce)
 
@@ -424,52 +431,71 @@ instance Show Label where show (Label l) = "L" ++ (show l)
 
 
 
-data FlowGraph x l = FlowGraph {nodes :: Map l (FlowNode x l)} deriving (Eq, Show)
-
-data FlowNode x l
-    = Block      {extra :: x, body :: [BasicStmt], next :: l}
-    | IfThenElse {extra :: x, cond :: BasicExpr, ifTrue, ifFalse :: l}
-    | Return     {extra :: x, expr :: BasicExpr}
-    deriving (Eq, Show, Functor)
-
-data BasicStmt
-    = BSetVar TType VarId BasicExpr
-    | BSetIndex TType VarId BasicExpr BasicExpr
-    | BGetIndex TType VarId BasicExpr BasicExpr
-    | B1 TType VarId Op1 BasicExpr
-    | B2 TType VarId Op2 BasicExpr BasicExpr
-    | BApp TType VarId FunId [BasicExpr]
-    deriving (Eq)
-
-data BasicExpr
-    = BVar TType VarId 
-    | BNum NumType Int
-    deriving (Eq)
-
-
 type FlowGraph' l = FlowGraph () l
 type FlowNode'  l = FlowNode  () l
 block'      = Block ()
 ifThenElse' = IfThenElse ()
 return'     = Return ()
 
-overNodes f (g @ FlowGraph {nodes=ns}) = g { nodes = f ns }
-emptyFlowGraph = FlowGraph {nodes=M.empty}
+type FlowGraph x l = FlowGraphG BasicExpr BasicStmt x l
+type FlowNode  x l = FlowNodeG  BasicExpr BasicStmt x l
+
+
+data FlowGraphG expr stmt x l =
+    FlowGraphG {nodes :: Map l (FlowNodeG expr stmt x l)}
+    deriving (Eq)
+
+data FlowNodeG expr stmt x l
+    = Block      {extra :: x, body :: [stmt], next :: l}
+    | IfThenElse {extra :: x, cond :: expr, ifTrue, ifFalse :: l}
+    | Return     {extra :: x, expr :: expr}
+    deriving (Eq, Functor)
+
+-- type (Const Void) a = Void
+type BasicStmt    = BasicStmtG (Const Void) VarId
+
+type BasicStmtSSE = BasicStmtG BPhi VarIdSSE
+-- data BPhi var = BPhi var [(var, Label)]
+data BPhi var = BPhi var [var]
+    deriving (Eq)
+
+data BasicStmtG (con :: * -> *) var
+    = BSetVar TType var (BasicExprG var)
+    | BSetIndex TType var (BasicExprG var) (BasicExprG var)
+    | BGetIndex TType var (BasicExprG var) (BasicExprG var)
+    | B1 TType var Op1 (BasicExprG var)
+    | B2 TType var Op2 (BasicExprG var) (BasicExprG var)
+    | BApp TType var FunId [(BasicExprG var)]
+    | BOther (con var)
+    deriving (Eq)
+
+type BasicExpr    = BasicExprG VarId
+type BasicExprSSE = BasicExprG VarIdSSE
+
+data BasicExprG var
+    = BVar TType var 
+    | BNum NumType Int
+    deriving (Eq)
+
+
+
+overNodes f (g @ FlowGraphG {nodes=ns}) = g { nodes = f ns }
+emptyFlowGraph = FlowGraphG {nodes=M.empty}
 overExtra f n = n {extra = f (extra n)}
 
-getNode :: (Ord l) => l -> FlowGraph x l -> FlowNode x l
+getNode :: (Ord l) => l -> FlowGraphG e s x l -> FlowNodeG e s x l
 getNode l = (M.! l) . nodes
 
-insertNode :: (Ord l) => l -> FlowNode x l -> FlowGraph x l -> FlowGraph x l
+insertNode :: (Ord l) => l -> FlowNodeG e s x l -> FlowGraphG e s x l -> FlowGraphG e s x l
 insertNode l n = overNodes (M.insert l n)
 
-insertNodes :: (Ord l) => [(l, FlowNode x l)] -> FlowGraph x l -> FlowGraph x l
+insertNodes :: (Ord l) => [(l, FlowNodeG e s x l)] -> FlowGraphG e s x l -> FlowGraphG e s x l
 insertNodes ns = overNodes (M.union (M.fromList ns))
 
-deleteNode :: (Ord l) => l -> FlowGraph x l -> FlowGraph x l
+deleteNode :: (Ord l) => l -> FlowGraphG e s x l -> FlowGraphG e s x l
 deleteNode l = overNodes (M.delete l)
 
-graphLabels :: FlowGraph x l -> [l]
+graphLabels :: FlowGraphG e s x l -> [l]
 graphLabels = map fst . M.toList . nodes
 
 
@@ -486,6 +512,7 @@ instance Show BasicStmt where
     show (B1 _ v op x)         = (showVarId v) +=+ (show op) ++ (show x)
     show (B2 _ v op a b)       = (showVarId v) +=+ ((show a) +|+ (show op) +|+ (show b))
     show (BApp _ v f exprs)    = (showVarId v) +=+ (f ++ (parens . concat . intersperse ", " . map show $ exprs))
+    show (BOther (Const void)) = absurd void
 
 
 
@@ -829,6 +856,27 @@ reorder :: Label -> FlowGraph x Label -> FlowGraph x Label
 reorder entry graph = let order = someOrder entry graph in renameLabels order graph
 
 
+
+
+type VarIdSSE = (VarId, Int)
+
+succVar :: VarIdSSE -> VarIdSSE
+succVar (var, i) = (var, i+1)
+
+sameVar :: VarIdSSE -> VarIdSSE -> Bool
+sameVar (a, _) (b, _) = a == b
+
+sse :: FlowGraphG BasicStmt BasicExpr x Label -> FlowGraphG BasicStmtSSE BasicExprSSE x Label
+sse graph = undefined
+
+
+
+
+
+
+
+
+
 -- findUsedVars :: FlowGraph x Label -> [VarId]
 -- findUsedVars = nub . concat . map basicStmtVars . concat . map body . filter isBlock . map snd . M.toList . nodes
 
@@ -872,6 +920,8 @@ instance Show BlockVars where
                 where showVarSet = braces . concat . intersperse ", " . map showVarId . S.toList
 
 
+
+
 liveness :: FlowGraph x Label -> FlowGraph BlockVars Label
 liveness graph = (`execState` graph') $ mapM_ (go S.empty) endLabels where
         endLabels = map fst . filter (isReturn . snd) . M.toList . nodes $ graph
@@ -906,6 +956,8 @@ liveness graph = (`execState` graph') $ mapM_ (go S.empty) endLabels where
         basicStmtVars' (B1 _ v _ x)         = (basicExprVars' x,                                 v)
         basicStmtVars' (B2 _ v _ a b)       = ((basicExprVars' a) `S.union` (basicExprVars' b),  v)
         basicStmtVars' (BApp _ v f exprs)   = (S.unions . map basicExprVars' $ exprs,            v)
+        basicStmtVars' (BOther (Const void)) = absurd void
+
 
         basicExprVars' = S.fromList . basicExprVars
 
@@ -1125,6 +1177,7 @@ compileBasicStmt (BApp t v f args) = do
         res = GeneralRegister . GeneralRegisterId $ 0
         cleanup = [Add (TPtr $ TNum TUInt) (OpLocReg Val esp) (OpValReg Val esp) (OpValConst Val argsSize)] 
     pure $ setup ++ [Call f', Mov t v' (OpValReg Val res)] ++ cleanup
+compileBasicStmt (BOther (Const void)) = absurd void
 
 locE = Left
 valE = Left
