@@ -35,7 +35,7 @@ import Control.DeepSeq (force, NFData)
 import Debug.Trace (trace)
 
 import Data.Bifunctor (first, second)
-import Data.List (mapAccumL)
+import Data.List (mapAccumL, mapAccumR)
 
 
 newtype InstructionIx     = InstructionIx Int     deriving (Eq, Show)
@@ -503,7 +503,7 @@ prettyShowVM VM {codeMemory=ops, stackMemory=stack, generalRegisters = regs, spe
     where
         specs' = "ESP:" ++ (show stackTopIx) ++ " " ++ "EBP:" ++ (show stackBaseIx)
         regs' = (joinWith " " regs)
-        stack' = map (joinWith' " ") . map (pad "_" 8) . map reverse . reverse . chunks 8 . reverse . map show . drop (stackTopIx) $ stack
+        stack' = snd . mapAccumR (\n line -> (n-8, (show n) ++ " | " ++ line)) ((length stack)-8) . map (joinWith' " ") . map (pad "_" 8) . map reverse . reverse . chunks 8 . reverse . map show . drop (stackTopIx) $ stack
         -- stack' = joinWith " " $ stack
         ops' = catMaybes . map (\i -> showOp i <$> (ops !? i)) $ [pc, pc+1, pc+2]
         showOp i op = (show i) ++ "  " ++ (show op) ++ (if i == pc then "  <--- " else "")
