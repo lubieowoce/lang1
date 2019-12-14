@@ -699,7 +699,7 @@ exprType (E2 op a b) = case op of
     OpLessEqual    -> do assertSameType a b; pure $ TBool
     OpGreaterEqual -> do assertSameType a b; pure $ TBool
 exprType (EApp fun exprs) = do 
-    FunType argTypes retTyp <- getFunType fun `orError'` ("undefined function 1: " ++ fun)
+    FunType argTypes retTyp <- getFunType fun `orError'` ("undefined function (no type found in `exprType`): " ++ fun)
     let nExpected = length argTypes
         nGot      = length exprs
     when (nExpected /= nGot) $ throwE $
@@ -833,7 +833,7 @@ toBasicExpr' e@(E2 op a b) typ = do
     pure (BVar typ r, s1 ++ s2 ++ [B2 at r op v1 v2])
 toBasicExpr' (EApp fun exprs) typ = do
     -- need type signature of fun!!!!
-    FunType argTypes _ <- getFunType fun `orError'` ("undefined function 2: " ++ fun)
+    FunType argTypes _ <- getFunType fun `orError'` ("undefined function (no type found in `toBasicExpr`): " ++ fun)
     xs <- sequence $ zipWith toBasicExpr exprs argTypes
     let vars  = map fst xs
     let temps = concat $ map snd xs
@@ -1073,6 +1073,14 @@ varToOpVal v = varLocToOpVal <$> getVarLoc v `orError'` ("undefined variable: " 
 compileModule :: Module -> Compile [OpIR3]
 compileModule (Module defs) = do
     -- allDefs :: [(Label, [OpIR2])]
+    forM_ defs $ \(def@(DDef funId paramsAndTypeIds retTypeId body)) -> do
+            argTypes <- forM paramsAndTypeIds $ \(arg, typeId) -> do
+                           resolveType typeId
+            retType <- resolveType retTypeId
+            declFunType funId (FunType argTypes retType)
+            funLabel <- newFun funId
+            pure ()
+
     allDefs <- forM defs $ \(def@(DDef funId _ _ _)) -> do
         u        <- getFresh
         funs     <- getFunLabels
@@ -1127,20 +1135,17 @@ Arg3                  <-- EBP + sizeof Ptr + sizeof InstrAddr + sizeof Arg1 + si
 
 
 compileDefinition :: Definition -> Compile [(Label, [OpIR2])]
-compileDefinition def@(DDef funId paramsAndTypeIds retTypeId body) = do
-    argTypes <- forM paramsAndTypeIds $ \(arg, typeId) -> do
-                   t <- resolveType typeId
-                   declVarType arg t
-                   pure t
-    retType <- resolveType retTypeId
-    declFunType funId (FunType argTypes retType)
+compileDefinition def@(DDef funId paramsAndTypeIds _ body) = do
+    FunType argTypes retType <- getFunType funId `orError'` ("Internal Error: " ++ funId ++ " should be declared by now")
+    funLabel <- getFunLabel funId `orError'` ("Internal Error: " ++ funId ++ " should have a label by now")
 
     fits <- fitsInRegister retType
     when (not fits) $
-        throwE $ (show retTypeId) ++ " is too big to be returned directly"
+        throwE $ (show retType) ++ " is too big to be returned by value"
 
-    params <- mapM (\(p, tid) -> do t <- resolveType tid; pure (p, t)) paramsAndTypeIds
-    funLabel <- newFun funId
+    let params = zipWith (\(arg, _) t -> (arg, t)) paramsAndTypeIds argTypes
+    mapM_ (uncurry declVarType) params
+
     (entry, _graph) <- flowGraph def
     let graph = joinBlocks _graph
     localsAndParams <- getVarTypes;
@@ -1287,7 +1292,7 @@ compileBasicStmt (B2 t v op a b) = do
                 OpLessEqual    -> LessEqual
                 OpGreaterEqual -> GreaterEqual
 compileBasicStmt (BApp t v f args) = do
-    f' <- getFunLabel f `orError'` ("undefined function 3: " ++ f)
+    f' <- getFunLabel f `orError'` ("undefined function (no label found): " ++ f)
     args' <- mapM (\e -> do e' <- basicExprToOpVal e; pure (basicExprType e, e')) $ reverse args
     argsSize <- sum <$> mapM (typeSizeBytes . fst) args'
     v' <- varToOpLoc v
@@ -1731,10 +1736,6 @@ m5 = Module [p5_digit, p5_str, p5_sum, p5_main]
 
 
 m6 = Module [
-    DDef "sum2" [("xs", ArrayType (tt "int") 2)] (tt "int") [
-        SReturn $ ((vv "xs") `EIndex` (uu 0)) `eAdd` ((vv "xs") `EIndex` (uu 1))
-    ],
-
     DDef "main" [] (tt "int") [
         SNewVar "arr" (ArrayType (tt "int") 2) (
             EArrayLiteral (tt "int")
@@ -1742,6 +1743,10 @@ m6 = Module [
                 , (ii 21) ]
         ),
         SReturn $ EApp "sum2" [vv "arr"]
+    ],
+
+    DDef "sum2" [("xs", ArrayType (tt "int") 2)] (tt "int") [
+        SReturn $ ((vv "xs") `EIndex` (uu 0)) `eAdd` ((vv "xs") `EIndex` (uu 1))
     ]
 
     ]
