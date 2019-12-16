@@ -1475,9 +1475,9 @@ data OpIR label loc val
 
     | Add TType loc val val
     | Sub TType loc val val
+    | Mod TType loc val val
     | Mul TType loc val val
     | Div TType loc val val
-    | Mod TType loc val val
 
     | Incr TType loc
     | Decr TType loc
@@ -1540,9 +1540,9 @@ toVMOp (Push t val)                   = (RegisterVM.Push t' val')               
 toVMOp (Pop  t loc)                   = (RegisterVM.Pop  t' loc')                     where t' = toVMSize t; loc' = toVMOpLoc loc;
 toVMOp (Add t loc val1 val2)          = (RegisterVM.Add t' loc' val1' val2')          where t' = toVMSize t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
 toVMOp (Sub t loc val1 val2)          = (RegisterVM.Sub t' loc' val1' val2')          where t' = toVMSize t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
-toVMOp (Mul t loc val1 val2)          = (RegisterVM.Mul t' loc' val1' val2')          where t' = toVMSize t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
-toVMOp (Div t loc val1 val2)          = (RegisterVM.Div t' loc' val1' val2')          where t' = toVMSize t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
 toVMOp (Mod t loc val1 val2)          = (RegisterVM.Mod t' loc' val1' val2')          where t' = toVMSize t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
+toVMOp (Mul t loc val1 val2)          = (RegisterVM.Mul t' s loc' val1' val2')        where t' = toVMSize t; s = toVMSignedness t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
+toVMOp (Div t loc val1 val2)          = (RegisterVM.Div t' s loc' val1' val2')        where t' = toVMSize t; s = toVMSignedness t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
 toVMOp (Incr t loc)                   = (RegisterVM.Incr t' loc')                     where t' = toVMSize t; loc' = toVMOpLoc loc;
 toVMOp (Decr t loc)                   = (RegisterVM.Decr t' loc')                     where t' = toVMSize t; loc' = toVMOpLoc loc;
 toVMOp (Equal        t loc val1 val2) = (RegisterVM.Equal        t' loc' val1' val2') where t' = toVMSize t; loc' = toVMOpLoc loc; val1' = toVMOpVal val1; val2' = toVMOpVal val2; 
@@ -1770,11 +1770,11 @@ p5_main = DDef "main" [] (tt "int") [
                 , (ii (-31))
                 , (ii (-41)) ]
             ),
-        SNewVar "s" (ArrayType (tt "char") 8) (
-            EArrayLiteral (tt "char") [ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_']
-        ),
         SNewVar "n" (tt "int") (
             EApp "sum" [(EAddressOf $ vv "arr" `EIndex` uu 0), (uu 4)]
+        ),
+        SNewVar "s" (ArrayType (tt "char") 8) (
+            EArrayLiteral (tt "char") [ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_']
         ),
         SNewVar "len" (tt "uint") (
             EApp "str" [(vv "n"), (EAddressOf $ vv "s" `EIndex` uu 0)]
@@ -1795,15 +1795,29 @@ m6 = Module [
     DDef "main" [] (tt "int") [
         SNewVar "arr" (ArrayType (tt "int") 2) (
             EArrayLiteral (tt "int")
-                [ (ii 11)
-                , (ii 21) ]
+                [ (ii (-11))
+                , (ii (-11)) ]
         ),
-        SReturn $ EApp "sum2" [vv "arr"]
+        SNewVar "res" (tt "int") $ EApp "mul2" [vv "arr"],
+
+        SNewVar "s" (ArrayType (tt "char") 8) (
+            EArrayLiteral (tt "char") [ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_']
+        ),
+        SNewVar "res_len" (tt "uint") (
+            EApp "str" [(vv "res"), (EAddressOf $ vv "s" `EIndex` uu 0)]
+        ),
+        SNewVar "_2" (tt "bool") (
+            EApp "print" [(EAddressOf $ vv "s" `EIndex` uu 0), (vv "res_len")]
+        ),
+
+        SReturn (vv "res")
     ],
 
-    DDef "sum2" [("xs", ArrayType (tt "int") 2)] (tt "int") [
-        SReturn $ ((vv "xs") `EIndex` (uu 0)) `eAdd` ((vv "xs") `EIndex` (uu 1))
-    ]
+    DDef "mul2" [("xs", ArrayType (tt "int") 2)] (tt "int") [
+        SReturn $ ((vv "xs") `EIndex` (uu 0)) `eMul` ((vv "xs") `EIndex` (uu 1))
+    ],
+
+    p5_str, p5_digit, p5_str_rev
 
     ]
 
@@ -1811,7 +1825,7 @@ main = either (putStrLn . ("Error: "++)) pure  =<<  (runExceptT mainE)
 
 mainE :: ExceptT String IO ()
 mainE = do
-    let mod@(Module funs) = m5
+    let mod@(Module funs) = m6
     lift $ mapM_ print funs
     ops <- ExceptT . pure $
         evalCompile

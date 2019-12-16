@@ -259,9 +259,9 @@ data Op
 
     | Add Size OpLoc OpVal OpVal
     | Sub Size OpLoc OpVal OpVal
-    | Mul Size OpLoc OpVal OpVal
-    | Div Size OpLoc OpVal OpVal
     | Mod Size OpLoc OpVal OpVal
+    | Mul Size Signedness OpLoc OpVal OpVal
+    | Div Size Signedness OpLoc OpVal OpVal
 
     | Incr Size OpLoc
     | Decr Size OpLoc
@@ -310,11 +310,11 @@ step vm@VM{codeMemory=ops, stackMemory=stack, specialRegisters=specs@SpecialRegi
             Push size v           ->  push size v   vm'
             Pop  size dst         ->  pop  size dst vm'
 
-            Add size dst a b           ->  binop size Unsigned (+) dst a b vm'
-            Sub size dst a b           ->  binop size Unsigned (-) dst a b vm'
-            Mul size dst a b           ->  binop size Unsigned (*) dst a b vm'
-            Div size dst a b           ->  binop size Unsigned (div) dst a b vm'
+            Add size dst a b           ->  binop size Unsigned (+)   dst a b vm'
+            Sub size dst a b           ->  binop size Unsigned (-)   dst a b vm'
             Mod size dst a b           ->  binop size Unsigned (mod) dst a b vm'
+            Mul size sign dst a b      ->  binop size sign     (*)   dst a b vm'
+            Div size sign dst a b      ->  binop size sign     (div) dst a b vm'
 
             Incr size loc              ->  incrop size (+ 1)        loc vm'
             Decr size loc              ->  incrop size (subtract 1) loc vm'
@@ -724,7 +724,8 @@ ptostr lbl = let
         Mov _Ptr (reg rdst) (_ebpv $ offset_out),
         Mov _Int (reg rlen) (int 0),
 
-        Greater _Int Unsigned (reg rtemp) (regv rnum) (int 0),
+        Equal _Int (reg rtemp) (regv rnum) (int 0),
+        Not _Int (reg rtemp) (regv rtemp),
         JmpIf (regv rtemp) (lbl "tostr_signed"),
         Mov _Char (_reg rdst) (int 48),
         Mov _Int (reg 0) (int 1),
@@ -733,7 +734,7 @@ ptostr lbl = let
         Less _Int Signed (reg rtemp) (regv rnum) (int 0),
         Not _Int (reg rtemp) (regv rtemp),
         JmpIf (regv rtemp) (lbl "tostr_loop"),
-        Mul _Int (reg rnum) (int (-1)) (regv rnum), 
+        Mul _Int Signed (reg rnum) (int (-1)) (regv rnum), 
         Mov _Int (_ebp $ offset_num) (regv rnum),
         Mov _Int (_ebp $ offset_was_signed) (int 1) ]),
     ("tostr_loop", [
@@ -742,7 +743,7 @@ ptostr lbl = let
         Mod _Int (reg rtemp) (regv rnum) (int 10),
         Add _Int (reg rtemp) (regv rtemp) (int 48),
         Mov _Char (_reg rdst) (regv rtemp),
-        Div _Int (reg rnum) (regv rnum) (int 10),
+        Div _Int Unsigned (reg rnum) (regv rnum) (int 10),
         Incr _Ptr (reg rdst),
         Incr _Int (reg rlen),
         Jmp (lbl "tostr_loop") ]),
