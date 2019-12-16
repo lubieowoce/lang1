@@ -1073,6 +1073,9 @@ varToOpVal v = varLocToOpVal <$> getVarLoc v `orError'` ("undefined variable: " 
 compileModule :: Module -> Compile [OpIR3]
 compileModule (Module defs) = do
     -- allDefs :: [(Label, [OpIR2])]
+    printLabel <- newFun "print"
+    declFunType "print" (FunType [TPtr TChar, TNum TUInt] TBool)
+
     forM_ defs $ \(def@(DDef funId paramsAndTypeIds retTypeId body)) -> do
             argTypes <- forM paramsAndTypeIds $ \(arg, typeId) -> do
                            resolveType typeId
@@ -1101,13 +1104,38 @@ compileModule (Module defs) = do
             labeledOps
     mainLabel <- getFunLabel "main" `orError'` ("missing definition for main()")
     bootstrapLabel <- freshLabel
+
+    sizeof_Ptr <- typeSizeBytes $ TPtr TChar
+    sizeof_InstrAddr <- typeSizeBytes $ TNum TUInt
     let
         bootstrap :: [(Label, [OpIR2])]
         bootstrap =
             [(bootstrapLabel, [Call mainLabel,
                               Push (TNum TInt) (OpValReg Val (GeneralRegister . GeneralRegisterId $ 0)),
                               SyscallExit ])]
-    pure . labelsToOffsets . concat $ (bootstrap : allDefs)  
+        print :: [(Label, [OpIR2])]
+        print =
+            let
+            _ebp offset  = (OpLocReg (Ref offset) . SpecialRegister $ StackBase)
+            _ebpv offset = (OpValReg (Ref offset) . SpecialRegister $ StackBase)
+            esp  = (OpLocReg Val . SpecialRegister $ StackTop)
+            espv = (OpValReg Val . SpecialRegister $ StackTop)
+            ebp  = (OpLocReg Val . SpecialRegister $ StackBase)
+            ebpv = (OpValReg Val . SpecialRegister $ StackBase)
+            _TByte = TChar
+            _TInstrAddr = TNum TUInt
+            in
+            [(printLabel, [
+                Push (TPtr _TByte) ebpv,
+                Mov (TPtr _TByte) ebp espv,
+                Push (TNum TUInt) (_ebpv $ sizeof_Ptr + sizeof_InstrAddr + sizeof_Ptr), -- len
+                Push (TPtr TChar) (_ebpv $ sizeof_Ptr + sizeof_InstrAddr), -- ptr
+                SyscallPrint,
+                Mov (TPtr _TByte) esp ebpv,
+                Pop (TPtr _TByte) ebp,
+                Ret ] )
+            ]
+    pure . labelsToOffsets . concat $ (bootstrap : print : allDefs)  
 
 
 
@@ -1567,6 +1595,8 @@ toVMRef Val     = RegisterVM.Val
 toVMRef (Ref n) = RegisterVM.Ref n
 
 
+eFalse = eEqual (uu 3) (uu 5)
+eTrue  = eEqual (uu 3) (uu 3)
 
 eNot = E1 OpNot
 eAdd          = E2 OpAdd
@@ -1662,6 +1692,21 @@ p4 = DDef "pred" [("x", tt "uint")] (tt "uint") [
 
 
 
+p5_str_rev = DDef "str_rev" [("str", ptr (tt "char")), ("len", (tt "uint"))] (tt "bool") [
+        SNewVar "i_front" (tt "uint") (uu 0),
+        SNewVar "i_back" (tt "uint") (vv "len" `eSub` uu 1),
+        SNewVar "tmp" (tt "char") (ch '_'),
+        SWhile (vv "i_front" `eLess` vv "i_back") [
+            SSetVar "tmp" $ (vv "str") `EIndex` (vv "i_back"),
+            SSetIndex "str" (vv "i_back")
+                $ (vv "str") `EIndex` (vv "i_front"),
+            SSetIndex "str" (vv "i_front") (vv "tmp"),
+            SSetVar "i_front" (vv "i_front" `eAdd` uu 1),
+            SSetVar "i_back" (vv "i_back" `eSub` uu 1)
+        ],
+        SReturn eTrue
+    ]
+
 
 
 p5_sum = DDef "sum" [("xs", ptr (tt "int")), ("len", (tt "uint"))] (tt "int") [
@@ -1672,8 +1717,10 @@ p5_sum = DDef "sum" [("xs", ptr (tt "int")), ("len", (tt "uint"))] (tt "int") [
         SReturn (vv "res")
     ]
 
+
 p5_str = DDef "str" [("n", (tt "int")), ("out", ptr (tt "char"))] (tt "uint") [
         SNewVar "i" (tt "uint") (uu 0),
+        SNewVar "was_negative" (tt "bool") eFalse,
         SIfThenElse (vv "n" `eEqual` (ii 0)) [
             SSetIndex "out" (uu 0) (EChar '0'),
             SSetVar "i" $ (vv "i") `eAdd` (uu 1),
@@ -1681,7 +1728,7 @@ p5_str = DDef "str" [("n", (tt "int")), ("out", ptr (tt "char"))] (tt "uint") [
         ] [],
         SIfThenElse (vv "n" `eLess` (ii 0)) [
             SSetIndex "out" (uu 0) (EChar '-'),
-            SSetVar "i" $ (vv "i") `eAdd` (uu 1),
+            SSetVar "was_negative" eTrue,
             SSetVar "n" $ (vv "n") `eMul` (ii (-1))
         ] [],
         SWhile (eNot $ (vv "n") `eEqual` (ii 0)) [
@@ -1691,7 +1738,12 @@ p5_str = DDef "str" [("n", (tt "int")), ("out", ptr (tt "char"))] (tt "uint") [
             SSetVar "i" $ (vv "i") `eAdd` (uu 1),
             SSetVar "n" $ (vv "n") `eDiv` (ii 10)
         ],
-        -- EApp "strrev" [(vv "out"), (vv "i")],
+        SIfThenElse (vv "was_negative") [
+            SSetIndex "out" (vv "i") (EChar '-'),
+            SSetVar "i" $ (vv "i") `eAdd` (uu 1)
+        ] [],
+
+        SNewVar "_" (tt "bool") $ EApp "str_rev" [(vv "out"), (vv "i")],
         SReturn (vv "i")
     ]
 
@@ -1713,10 +1765,10 @@ p5_main = DDef "main" [] (tt "int") [
         -- SReturn (eEqual (uu 21) (EApp "fib'" [uu 7]))
         SNewVar "arr" (ArrayType (tt "int") 4) (
             EArrayLiteral (tt "int")
-                [ (ii 11)
-                , (ii 21)
-                , (ii 31)
-                , (ii 41) ]
+                [ (ii (-11))
+                , (ii (-21))
+                , (ii (-31))
+                , (ii (-41)) ]
             ),
         SNewVar "s" (ArrayType (tt "char") 8) (
             EArrayLiteral (tt "char") [ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_', ch '_']
@@ -1724,15 +1776,19 @@ p5_main = DDef "main" [] (tt "int") [
         SNewVar "n" (tt "int") (
             EApp "sum" [(EAddressOf $ vv "arr" `EIndex` uu 0), (uu 4)]
         ),
-        SNewVar "_" (tt "uint") (
+        SNewVar "len" (tt "uint") (
             EApp "str" [(vv "n"), (EAddressOf $ vv "s" `EIndex` uu 0)]
         ),
+        SNewVar "_2" (tt "bool") (
+            EApp "print" [(EAddressOf $ vv "s" `EIndex` uu 0), (vv "len")]
+        ),
+
         SReturn (vv "n") 
         -- SReturn (eEqual (ii 10) (EApp "sum" [(vv "arr" `ECast` (ptr $ tt "int")), (uu 4)]))
         -- SReturn (foldr1 eAdd $ map (EIndex (vv "arr") . uu) [0..3])
     ]
 
-m5 = Module [p5_digit, p5_str, p5_sum, p5_main]
+m5 = Module [p5_main, p5_sum, p5_str, p5_digit, p5_str_rev]
 
 
 m6 = Module [
@@ -1755,7 +1811,7 @@ main = either (putStrLn . ("Error: "++)) pure  =<<  (runExceptT mainE)
 
 mainE :: ExceptT String IO ()
 mainE = do
-    let mod@(Module funs) = m6
+    let mod@(Module funs) = m5
     lift $ mapM_ print funs
     ops <- ExceptT . pure $
         evalCompile
