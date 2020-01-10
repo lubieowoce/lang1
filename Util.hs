@@ -4,9 +4,18 @@ module Util where
 
 import Data.List (nub, intersperse)
 import Debug.Trace (trace)
+import System.IO.Unsafe (unsafePerformIO)
+
+import Data.Bifunctor
 
 import Data.Void
 import Control.Monad (ap)
+
+
+
+debugIO :: (a -> IO b) -> a -> a
+debugIO f a = (unsafePerformIO $ f a) `seq` a
+{-# NOINLINE debugIO #-}
 
 a +=+ b = a ++ " = " ++ b
 a +|+ b = a ++ " " ++ b
